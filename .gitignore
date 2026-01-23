@@ -1,0 +1,27 @@
+*.lif
+Vasculature/lif/
+data/
+outputs/
+results/
+*.pdf
+*.gif
+# Raw microscopy / big data
+*.lif
+*.czi
+*.nd2
+*.lsm
+*.oib
+*.oif
+*.tif
+*.tiff
+*.h5
+*.hdf5
+
+# Zarr (directory-based)
+*.zarr/
+
+# Common outputs
+**/output/
+**/outputs/
+**/results/
+**/data/
