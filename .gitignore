@@ -16,7 +16,7 @@ results/
 *.tiff
 *.h5
 *.hdf5
-
+**/*.npz
 # Zarr (directory-based)
 *.zarr/
 
@@ -26,3 +26,6 @@ results/
 **/results/
 **/data/
 luca_models/
+
+./legacy
+legacy/
