@@ -240,8 +240,26 @@ def run_translation_and_segmentation(
     n_iter: int = 1,
     ref_voxel_um: Tuple[float, float, float] = (5.0, 2.0, 2.0),
     iso_voxel_um: Tuple[float, float, float] = (2.0, 2.0, 2.0),
+    device_width_um: float = 30.0,
     use_gpu: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _crop_xy_equal_margin(arr: np.ndarray, crop_y_px: int, crop_x_px: int) -> np.ndarray:
+        out = np.asarray(arr)
+        if out.ndim < 3:
+            return out
+        y0 = int(max(0, crop_y_px))
+        x0 = int(max(0, crop_x_px))
+        y1 = int(out.shape[1] - y0)
+        x1 = int(out.shape[2] - x0)
+        if y1 <= y0 or x1 <= x0:
+            raise RuntimeError(
+                f"Device-width crop too large for shape {tuple(out.shape[:3])}: crop_y={crop_y_px}, crop_x={crop_x_px}."
+            )
+        slicer = [slice(None)] * out.ndim
+        slicer[1] = slice(y0, y1)
+        slicer[2] = slice(x0, x1)
+        return out[tuple(slicer)]
+
     stack_input_raw = np.asarray(cropped_z_stack, dtype=np.float32)
     if stack_input_raw.ndim != 3:
         raise ValueError(f"Expected cropped_z_stack with shape (Z,Y,X), got {stack_input_raw.shape}")
@@ -274,6 +292,25 @@ def run_translation_and_segmentation(
         model_path=str(seg_model_path),
         device=device,
     )
+
+    try:
+        width_um = float(device_width_um)
+    except Exception as exc:
+        raise ValueError(f"device_width_um must be numeric, got {device_width_um!r}") from exc
+
+    if width_um < 0:
+        raise ValueError(f"device_width_um must be >= 0, got {width_um}")
+
+    _, y_um_iso, x_um_iso = (float(iso_voxel_um[0]), float(iso_voxel_um[1]), float(iso_voxel_um[2]))
+    if y_um_iso <= 0 or x_um_iso <= 0:
+        raise ValueError(f"iso_voxel_um must have positive y/x spacing, got {iso_voxel_um}")
+
+    crop_y = int(np.rint(width_um / y_um_iso))
+    crop_x = int(np.rint(width_um / x_um_iso))
+
+    translated_iso = _crop_xy_equal_margin(translated_iso, crop_y_px=crop_y, crop_x_px=crop_x).astype(np.float32)
+    seg_prob_map = _crop_xy_equal_margin(seg_prob_map, crop_y_px=crop_y, crop_x_px=crop_x).astype(np.float32)
+    seg_mask = _crop_xy_equal_margin(seg_mask, crop_y_px=crop_y, crop_x_px=crop_x).astype(np.uint8)
 
     return translated_iso, np.asarray(seg_prob_map, dtype=np.float32), np.asarray(seg_mask, dtype=np.uint8)
 
