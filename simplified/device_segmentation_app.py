@@ -1,4 +1,6 @@
-﻿import numpy as np
+﻿from __future__ import annotations
+
+import numpy as np
 import napari
 from pathlib import Path
 from typing import Optional
@@ -7,16 +9,13 @@ from magicgui import magicgui
 from magicgui.widgets import Container, TextEdit
 from liffile import LifFile
 from skimage import util
-from skimage.filters import threshold_triangle, sobel, gaussian, threshold_yen
-from skimage.measure import label, regionprops, moments_central
-from skimage.morphology import disk, remove_small_holes, closing
-from skimage.transform import ProjectiveTransform, warp
+from skimage.filters import threshold_triangle, median, sobel, gaussian, threshold_yen
+from skimage.measure import label, regionprops_table, regionprops, moments_central
+from skimage.morphology import disk, remove_small_objects, remove_small_holes, closing
+from skimage.transform import ProjectiveTransform, warp, probabilistic_hough_line
+from scipy.ndimage import rotate, binary_dilation
+from skimage.draw import line
 import tifffile
-
-try:
-    from device_segmentation_initial import segment_from_plane_initial
-except ModuleNotFoundError:
-    from bels_project_attempt.device_segmentation_initial import segment_from_plane_initial
 
 
 class DeviceSegmentationApp:
@@ -99,16 +98,6 @@ class DeviceSegmentationApp:
 
         self._cropped_layer = None
 
-        self._refocus_zmap_layer = None
-
-        self._refocus_before_layer = None
-
-        self._refocus_after_layer = None
-
-        self._refocus_delta_layer = None
-
-        self._last_prerefocus_zmap = None
-
         self._last_image = None
 
         self._last_image_path = None
@@ -124,6 +113,12 @@ class DeviceSegmentationApp:
         self._last_focus_n_sampling = 10
 
         self._last_focus_patch = 50
+
+        self._default_focus_downsample = 4
+
+        self._default_focus_n_sampling = 10
+
+        self._default_focus_patch = 50
 
 
 
@@ -154,8 +149,6 @@ class DeviceSegmentationApp:
 
 
         self._cropped_stack_xy_raw = None
-
-        self._cropped_stack_xy_refocused = None
 
         self._cropped_stack_z_raw = None
 
@@ -201,12 +194,6 @@ class DeviceSegmentationApp:
 
             image_choice={"label": "Image", "choices": ["(load images)"], "widget_type": "ComboBox"},
 
-            focus_downsample={"label": "LIF downsample", "min": 1, "max": 16, "step": 1},
-
-            focus_n_sampling={"label": "LIF n_sampling", "min": 4, "max": 100, "step": 1},
-
-            focus_patch={"label": "LIF patch", "min": 5, "max": 512, "step": 1},
-
             mask_central_region={"label": "Mask central region"},
 
             see_interim_layers={"label": "See interim layers (debug)"},
@@ -217,15 +204,7 @@ class DeviceSegmentationApp:
 
         )
 
-        def segment_and_view(
-
-            image_choice: str = "(load images)",
-
-            focus_downsample: int = 4,
-
-            focus_n_sampling: int = 10,
-
-            focus_patch: int = 50,
+        def segment_and_view(image_choice: str = "(load images)",
 
             mask_central_region: bool = False,
 
@@ -238,12 +217,6 @@ class DeviceSegmentationApp:
             self._segment_and_view(
 
                 image_choice=image_choice,
-
-                focus_downsample=focus_downsample,
-
-                focus_n_sampling=focus_n_sampling,
-
-                focus_patch=focus_patch,
 
                 mask_central_region=mask_central_region,
 
@@ -320,8 +293,6 @@ class DeviceSegmentationApp:
                 self.device_width_ok,
 
                 self.apply_crop,
-
-                self.crop_z,
 
                 self.images_output,
 
@@ -660,50 +631,6 @@ class DeviceSegmentationApp:
         img = np.take_along_axis(stack_zyx, zmap[None, :, :], axis=0)[0]
 
         return img, zmap, pts, zs
-
-
-
-    def _legacy_style_prerefocus_stack_zyx(self, stack_zyx, n_sampling: int, patch: int):
-
-        stack = np.asarray(stack_zyx)
-
-        if stack.ndim != 3:
-
-            raise ValueError(f"Expected ZYX stack for pre-refocus, got shape={stack.shape}")
-
-
-
-        _, zmap, _, _ = self._curved_plane_refocus(stack, grid=int(n_sampling), patch=int(patch), mask=None)
-
-        zmap = np.asarray(zmap, dtype=np.int32)
-
-
-
-        z_max = int(stack.shape[0])
-
-        half_win = int(z_max // 2)
-
-        deltas = np.arange(z_max, dtype=np.int32) - half_win
-
-
-
-        z_idx = zmap[None, :, :] + deltas[:, None, None]
-
-        z_idx = np.clip(z_idx, 0, z_max - 1)
-
-
-
-        y_idx, x_idx = np.indices(zmap.shape, dtype=np.int32)
-
-        y_idx = np.broadcast_to(y_idx, z_idx.shape)
-
-        x_idx = np.broadcast_to(x_idx, z_idx.shape)
-
-
-
-        z_refocused = stack[z_idx, y_idx, x_idx]
-
-        return np.asarray(z_refocused, dtype=stack.dtype), zmap.astype(np.int16)
 
     def _compute_focus_plane_from_stack(self, stack: Optional[np.ndarray], downsample: int, n_sampling: int, patch: int, source_is_lif: bool = False, image_index: Optional[int] = None):
 
@@ -1321,33 +1248,221 @@ class DeviceSegmentationApp:
 
     def _segment_from_plane(self, in_focus_plane: np.ndarray, mask_central_region: bool, return_debug: bool):
 
-        return segment_from_plane_initial(
+        flag = False
 
-            in_focus_plane,
+        in_focus_plane = self._to_gray(in_focus_plane)
 
-            mask_central_region,
 
-            return_debug,
 
-            to_gray=self._to_gray,
+        median_thresholded = median(np.asarray(in_focus_plane, dtype=np.float32), footprint=disk(7)).astype(np.float32)
 
-            mask_out_organoid=self._mask_out_organoid,
+        sobel_operated = sobel(median_thresholded).astype(np.float32)
 
-            signed_orientation=self._signed_orientation,
+        thresh = threshold_triangle(sobel_operated)
 
-            oriented_rect_corners_crop_necks_and_flares=self._oriented_rect_corners_crop_necks_and_flares,
+        binary = sobel_operated > thresh
 
-            corners_touch_border=self._corners_touch_border,
 
-            crop_rectified_from_corners=self._crop_rectified_from_corners,
 
-            line_length=self.line_length,
+        h, w = in_focus_plane.shape[:2]
 
-            line_gap=self.line_gap,
+        binary[h // 3 : 2 * (h // 3), w // 3 : 2 * (w // 3)] = 0
 
-            hough_threshold=self.hough_threshold,
 
-        )
+
+        organoid_region = None
+
+        if mask_central_region:
+
+            organoid_region = self._mask_out_organoid(in_focus_plane)
+
+            binary[organoid_region] = 0
+
+
+
+        labels = label(binary)
+
+        data = regionprops_table(labels, binary, properties=("label", "area", "eccentricity"))
+
+        condition = (data["area"] > 100) & (data["eccentricity"] > 0.5)
+
+        labels_to_dilate = util.map_array(labels, data["label"], data["label"] * condition)
+
+
+
+        dilated_output = np.zeros_like(labels, dtype=np.uint8)
+
+        base_selem = np.zeros((31, 31), dtype=bool)
+
+        base_selem[15, :] = 1
+
+        pad = base_selem.shape[0] // 2
+
+
+
+        for region in regionprops(labels_to_dilate):
+
+            angle_to_rotate = self._signed_orientation(region)
+
+            rotated_selem = rotate(base_selem.astype(float), angle=90 + angle_to_rotate, reshape=False, order=0) > 0.5
+
+
+
+            minr, minc, maxr, maxc = region.bbox
+
+            r0 = max(minr - pad, 0)
+
+            r1 = min(maxr + pad, labels_to_dilate.shape[0])
+
+            c0 = max(minc - pad, 0)
+
+            c1 = min(maxc + pad, labels_to_dilate.shape[1])
+
+
+
+            mask_roi = labels_to_dilate[r0:r1, c0:c1] == region.label
+
+            dilated = binary_dilation(mask_roi.astype(bool), structure=rotated_selem.astype(bool))
+
+            dilated_output[r0:r1, c0:c1][dilated] = 255
+
+
+
+        post_dilation_mask = np.logical_or(dilated_output, binary)
+
+        clean_labels = label(~post_dilation_mask)
+
+        props = regionprops(clean_labels)
+
+        largest_prop = max(props, key=lambda p: p.area)
+
+        device_mask = clean_labels == largest_prop.label
+
+
+
+        edges = reconstructed = reconstructed_mask = None
+
+        new_corners = new_angle_rad = new_centroid_xy = None
+
+
+
+        corners, angle_rad, centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(device_mask)
+
+        if corners is None or self._corners_touch_border(corners, device_mask.shape, margin=5):
+
+            flag = True
+
+            edges = remove_small_objects(labels_to_dilate > 0)
+
+            segs = probabilistic_hough_line(
+
+                edges,
+
+                line_length=self.line_length,
+
+                line_gap=self.line_gap,
+
+                threshold=self.hough_threshold,
+
+            )
+
+            reconstructed = np.zeros_like(edges, dtype=bool)
+
+            for (x0, y0), (x1, y1) in segs:
+
+                rr, cc = line(y0, x0, y1, x1)
+
+                reconstructed[rr, cc] = True
+
+
+
+            reconstructed_mask = np.logical_or(reconstructed, post_dilation_mask)
+
+            updated_clean_labels = label(~reconstructed_mask)
+
+            props = regionprops(updated_clean_labels)
+
+            largest_prop = max(props, key=lambda p: p.area)
+
+            new_device_mask = updated_clean_labels == largest_prop.label
+
+            new_corners, new_angle_rad, new_centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(new_device_mask)
+
+
+
+        if flag:
+
+            final_corners = new_corners
+
+            final_angle_rad = new_angle_rad
+
+            final_centroid_xy = new_centroid_xy
+
+        else:
+
+            final_corners = corners
+
+            final_angle_rad = angle_rad
+
+            final_centroid_xy = centroid_xy
+
+
+
+        cropped_rotated = self._crop_rectified_from_corners(in_focus_plane, final_corners)
+
+
+
+        if return_debug:
+
+            debug = {
+
+                "median_thresholded": median_thresholded,
+
+                "sobel_operated": sobel_operated,
+
+                "binary": binary,
+
+                "labels_to_dilate": labels_to_dilate,
+
+                "post_dilation_mask": post_dilation_mask,
+
+                "device_mask": device_mask,
+
+                "organoid_region": organoid_region,
+
+                "edges": edges,
+
+                "reconstructed": reconstructed,
+
+                "reconstructed_mask": reconstructed_mask,
+
+                "flag": flag,
+
+                "final_corners": final_corners,
+
+                "final_centroid_xy": final_centroid_xy,
+
+                "final_angle_rad": final_angle_rad,
+
+                "new_corners": new_corners,
+
+                "new_centroid_xy": new_centroid_xy,
+
+                "new_angle_rad": new_angle_rad,
+
+                "cropped_rotated": cropped_rotated,
+
+                "gpu_used_preprocess": False,
+
+                "gpu_used_dilation": False,
+
+            }
+
+            return in_focus_plane, organoid_region, final_corners, cropped_rotated, debug
+
+
+
+        return in_focus_plane, organoid_region, final_corners, cropped_rotated
 
 
 
@@ -1541,12 +1656,6 @@ class DeviceSegmentationApp:
 
         image_choice: str,
 
-        focus_downsample: int,
-
-        focus_n_sampling: int,
-
-        focus_patch: int,
-
         mask_central_region: bool,
 
         see_interim_layers: bool,
@@ -1582,6 +1691,12 @@ class DeviceSegmentationApp:
             return
 
 
+
+        focus_downsample = max(1, int(self._default_focus_downsample))
+
+        focus_n_sampling = max(4, int(self._default_focus_n_sampling))
+
+        focus_patch = max(5, int(self._default_focus_patch))
 
         self._last_focus_n_sampling = int(focus_n_sampling)
 
@@ -1751,35 +1866,7 @@ class DeviceSegmentationApp:
 
         self._focus_votes_layer = None
 
-        if self._refocus_zmap_layer is not None and self._refocus_zmap_layer in self.viewer.layers:
-
-            self.viewer.layers.remove(self._refocus_zmap_layer)
-
-        self._refocus_zmap_layer = None
-
-        if self._refocus_before_layer is not None and self._refocus_before_layer in self.viewer.layers:
-
-            self.viewer.layers.remove(self._refocus_before_layer)
-
-        self._refocus_before_layer = None
-
-        if self._refocus_after_layer is not None and self._refocus_after_layer in self.viewer.layers:
-
-            self.viewer.layers.remove(self._refocus_after_layer)
-
-        self._refocus_after_layer = None
-
-        if self._refocus_delta_layer is not None and self._refocus_delta_layer in self.viewer.layers:
-
-            self.viewer.layers.remove(self._refocus_delta_layer)
-
-        self._refocus_delta_layer = None
-
-        self._last_prerefocus_zmap = None
-
         self._cropped_stack_xy_raw = None
-
-        self._cropped_stack_xy_refocused = None
 
         self._cropped_stack_z_raw = None
 
@@ -2461,13 +2548,11 @@ class DeviceSegmentationApp:
 
             roi_inner_xy = self._get_current_roi_corners_xy()
 
-            roi_stack_only_refocused = None
-
-            roi_stack_only_raw = None
+            roi_stack_only = None
 
             if roi_inner_xy is not None:
 
-                roi_stack_only_raw = self._crop_rectified_stack_from_corners(self._last_stack, roi_inner_xy * float(scale))
+                roi_stack_only = self._crop_rectified_stack_from_corners(self._last_stack, roi_inner_xy * float(scale))
 
             self._last_geometry_best_z_min = None
 
@@ -2478,8 +2563,6 @@ class DeviceSegmentationApp:
 
 
             self._cropped_stack_xy_raw = cropped_stack
-
-            self._cropped_stack_xy_refocused = None
 
             self._cropped_stack_z_raw = None
 
@@ -2501,85 +2584,9 @@ class DeviceSegmentationApp:
 
             )
 
-
-
-            try:
-
-                refocused_stack, zmap_refocus = self._legacy_style_prerefocus_stack_zyx(
-
-                    self._cropped_stack_xy_raw.astype(np.float32),
-
-                    n_sampling=int(self._last_focus_n_sampling or 10),
-
-                    patch=int(self._last_focus_patch or 50),
-
-                )
-
-                self._cropped_stack_xy_refocused = refocused_stack.astype(np.float32)
-
-                self._last_prerefocus_zmap = np.asarray(zmap_refocus, dtype=np.float32)
-
-                self._register_z_stage_from_parent(
-
-                    parent_stage="cropped_xy_raw",
-
-                    stage_name="cropped_xy_refocused",
-
-                    child_nz=int(self._cropped_stack_xy_refocused.shape[0]),
-
-                    parent_z_min=0,
-
-                    parent_z_max=int(max(0, self._cropped_stack_xy_refocused.shape[0] - 1)),
-
-                    note="Legacy-style prerefocus stack before z-cropping.",
-
-                )
-
-                self._last_center_z0 = int(max(0, self._cropped_stack_xy_refocused.shape[0] // 2))
-
-            except Exception as e:
-
-                self._cropped_stack_xy_refocused = None
-
-                self._last_prerefocus_zmap = None
-
-                self._last_center_z0 = None
-
-                self.crop_z.call_button.enabled = False
-
-                self._set_z_controls_enabled(False, reset_values=True)
-
-                self.images_output.value = f"[ERROR] Pre-refocus failed, stopping because downstream steps require the refocused stack: {type(e).__name__}: {e}"
-
-                return
-
-
-
-            if roi_stack_only_raw is not None:
-
-                try:
-
-                    roi_stack_only_refocused, _ = self._legacy_style_prerefocus_stack_zyx(
-
-                        roi_stack_only_raw.astype(np.float32),
-
-                        n_sampling=int(self._last_focus_n_sampling or 10),
-
-                        patch=int(self._last_focus_patch or 50),
-
-                    )
-
-                    roi_stack_only_refocused = roi_stack_only_refocused.astype(np.float32)
-
-                except Exception:
-
-                    roi_stack_only_refocused = None
-
             self.crop_z.call_button.enabled = False
 
             self._set_z_controls_enabled(False)
-
-            self._sync_z_slice_widget_limits()
 
 
 
@@ -2587,7 +2594,7 @@ class DeviceSegmentationApp:
 
                 self._cropped_layer,
 
-                self._scale_to_uint8_view(self._get_active_stack_for_z()),
+                self._scale_to_uint8_view(cropped_stack),
 
                 "cropped_rotated",
 
@@ -2595,75 +2602,43 @@ class DeviceSegmentationApp:
 
 
 
-            if self._last_see_interim_layers and self._cropped_stack_xy_refocused is not None and self._last_prerefocus_zmap is not None:
-
-                raw_mean = np.asarray(self._cropped_stack_xy_raw, dtype=np.float32).mean(axis=0)
-
-                ref_mean = np.asarray(self._cropped_stack_xy_refocused, dtype=np.float32).mean(axis=0)
-
-                delta_mean = ref_mean - raw_mean
-
-
-
-                self._refocus_zmap_layer = self._add_or_update_image_layer(
-
-                    self._refocus_zmap_layer,
-
-                    np.asarray(self._last_prerefocus_zmap, dtype=np.float32),
-
-                    "prerefocus_zmap",
-
-                )
-
-                self._refocus_before_layer = self._add_or_update_image_layer(
-
-                    self._refocus_before_layer,
-
-                    self._scale_to_uint8_view(raw_mean),
-
-                    "prerefocus_before_mean",
-
-                )
-
-                self._refocus_after_layer = self._add_or_update_image_layer(
-
-                    self._refocus_after_layer,
-
-                    self._scale_to_uint8_view(ref_mean),
-
-                    "prerefocus_after_mean",
-
-                )
-
-                self._refocus_delta_layer = self._add_or_update_image_layer(
-
-                    self._refocus_delta_layer,
-
-                    self._scale_to_uint8_view(delta_mean),
-
-                    "prerefocus_delta_mean",
-
-                )
-
-
-
-            if self._last_center_z0 is None:
-
-                self._last_center_z0 = int(max(0, self._get_active_stack_for_z().shape[0] // 2))
+            self._last_center_z0 = None
 
             counts, vote_volume = (None, None)
 
-            if roi_stack_only_refocused is not None:
+            if roi_stack_only is not None:
 
                 counts, vote_volume = self._compute_focus_patch_votes_for_stack(
 
-                    roi_stack_only_refocused.astype(np.float32),
+                    roi_stack_only.astype(np.float32),
 
                     n_sampling=int(self._last_focus_n_sampling or 10),
 
                     patch=int(self._last_focus_patch or 50),
 
                 )
+
+
+
+            self._cropped_stack_z_raw = self._cropped_stack_xy_raw
+
+            self.cropped_xyz = self._cropped_stack_z_raw
+
+            self._register_z_stage_from_parent(
+
+                parent_stage="cropped_xy_raw",
+
+                stage_name="cropped_xyz",
+
+                child_nz=int(self._cropped_stack_z_raw.shape[0]),
+
+                parent_z_min=0,
+
+                parent_z_max=int(max(0, self._cropped_stack_z_raw.shape[0] - 1)),
+
+                note="Auto z selection: full geometry-rectified z stack (end z-crop disabled).",
+
+            )
 
 
 
@@ -2699,6 +2674,20 @@ class DeviceSegmentationApp:
 
 
 
+                if vote_volume is not None:
+
+                    self._focus_votes_layer = self._add_or_update_image_layer(
+
+                        self._focus_votes_layer,
+
+                        self._scale_to_uint8_view(vote_volume),
+
+                        "focus_votes_geometry_only",
+
+                    )
+
+
+
                 top_n = min(5, len(counts))
 
                 top_idx = np.argsort(counts)[::-1][:top_n]
@@ -2707,13 +2696,19 @@ class DeviceSegmentationApp:
 
                 all_txt = self._format_geometry_vote_planes()
 
+                per_layer_txt = ", ".join([f"z{int(i)}:{int(c)}" for i, c in enumerate(np.asarray(counts, dtype=int))])
+
                 self.images_output.value = (
 
                     f"[OK] Cropped aligned stack created from current geometry. center_z={self._last_center_z0}. "
 
-                    f"Geometry-only focus patch votes on refocused stack (inner geometry only; top planes): {top_txt}. "
+                    f"Geometry-only focus patch votes (inner geometry only; top planes): {top_txt}. "
 
-                    f"All nonzero voted planes: {all_txt}. Z range is auto-selected and locked."
+                    f"All nonzero voted planes: {all_txt}. "
+
+                    f"Z votes for each layer: {per_layer_txt}. "
+
+                    "End z-crop is disabled; using full geometry-rectified z stack."
 
                 )
 
@@ -2723,13 +2718,9 @@ class DeviceSegmentationApp:
 
                     f"[OK] Cropped aligned stack created from current geometry. center_z={self._last_center_z0}. "
 
-                    "Z range is auto-selected and locked."
+                    "No geometry votes found. End z-crop is disabled; using full geometry-rectified z stack."
 
                 )
-
-
-
-            self._update_z_crop_bounds(show_warning=False)
 
             return
 
@@ -2751,27 +2742,19 @@ class DeviceSegmentationApp:
 
     def _get_active_stack_for_z(self):
 
-        if self._cropped_stack_xy_refocused is not None:
-
-            return self._cropped_stack_xy_refocused
-
-        return None
+        return self._cropped_stack_xy_raw if self._cropped_stack_xy_raw is not None else self._last_stack
 
 
 
     def _set_z_controls_enabled(self, enabled: bool, reset_values: bool = False):
 
-        _ = enabled
-
         try:
 
-            self.crop_z.call_button.enabled = False
+            self.crop_z.z_range_um.enabled = bool(enabled)
 
-            self.crop_z.z_range_um.enabled = False
+            self.crop_z.z_min.enabled = bool(enabled)
 
-            self.crop_z.z_min.enabled = False
-
-            self.crop_z.z_max.enabled = False
+            self.crop_z.z_max.enabled = bool(enabled)
 
         except Exception:
 
@@ -2803,9 +2786,7 @@ class DeviceSegmentationApp:
 
         try:
 
-            active_stack = self._get_active_stack_for_z()
-
-            nz = int(active_stack.shape[0]) if active_stack is not None else 0
+            nz = int(self._cropped_stack_xy_raw.shape[0]) if self._cropped_stack_xy_raw is not None else 0
 
             max_z = max(0, nz - 1)
 
@@ -2823,79 +2804,23 @@ class DeviceSegmentationApp:
 
 
 
-    def _largest_vote_run_above_threshold(self, counts: np.ndarray, min_votes_exclusive: float = 1.0):
+    def _compute_z_min_max_slices(self, z_range_um: float):
 
-        arr = np.asarray(counts).astype(float)
+        try:
 
-        nz_idx = np.flatnonzero(arr > float(min_votes_exclusive))
+            z_range_um = float(z_range_um)
 
-        if nz_idx.size == 0:
+        except Exception:
 
             return None, None
 
 
 
-        best_start = best_end = None
-
-        best_len = -1
-
-        best_sum = -1.0
-
-
-
-        cur_start = int(nz_idx[0])
-
-        cur_end = int(nz_idx[0])
-
-        for i in nz_idx[1:]:
-
-            ii = int(i)
-
-            if ii == (cur_end + 1):
-
-                cur_end = ii
-
-            else:
-
-                cur_len = int(cur_end - cur_start + 1)
-
-                cur_sum = float(np.sum(arr[cur_start : cur_end + 1]))
-
-                if (cur_len > best_len) or (cur_len == best_len and cur_sum > best_sum):
-
-                    best_start, best_end = cur_start, cur_end
-
-                    best_len = cur_len
-
-                    best_sum = cur_sum
-
-                cur_start = ii
-
-                cur_end = ii
-
-
-
-        cur_len = int(cur_end - cur_start + 1)
-
-        cur_sum = float(np.sum(arr[cur_start : cur_end + 1]))
-
-        if (cur_len > best_len) or (cur_len == best_len and cur_sum > best_sum):
-
-            best_start, best_end = cur_start, cur_end
-
-
-
-        return int(best_start), int(best_end)
-
-
-
-    def _compute_vote_driven_z_bounds(self, min_total_um: float = 160.0, min_down_um: float = 30.0):
-
         stack = self._get_active_stack_for_z()
 
-        if stack is None or self._last_z_step_um is None or float(self._last_z_step_um) <= 0:
+        if stack is None or self._last_center_z0 is None or self._last_z_step_um is None or float(self._last_z_step_um) <= 0:
 
-            return None, None, "[DEBUG] vote-run z-crop unavailable: missing active refocused stack or z-step metadata."
+            return None, None
 
 
 
@@ -2903,145 +2828,55 @@ class DeviceSegmentationApp:
 
         self._last_nz = nz
 
-        z_step_um = float(self._last_z_step_um)
+        z_range_px = max(1, int(round(z_range_um / float(self._last_z_step_um))))
 
+        if z_range_px >= nz:
 
+            return 0, nz - 1
 
-        counts = self._last_geometry_vote_counts
 
-        if counts is None:
 
-            return None, None, "[DEBUG] vote-run z-crop unavailable: no geometry vote counts found."
+        half = z_range_px // 2
 
+        z0 = int(np.clip(int(self._last_center_z0), 0, nz - 1))
 
+        lower = z0 - half
 
-        counts = np.asarray(counts).astype(float)
+        upper = lower + (z_range_px - 1)
 
-        if counts.size != nz:
 
-            aligned = np.zeros(nz, dtype=np.float32)
 
-            ncopy = int(min(nz, counts.size))
+        if lower < 0:
 
-            aligned[:ncopy] = counts[:ncopy]
+            return 0, z_range_px - 1
 
-            counts = aligned
+        if upper > (nz - 1):
 
+            return nz - z_range_px, nz - 1
 
-
-        run_min, run_max = self._largest_vote_run_above_threshold(counts, min_votes_exclusive=0.0)
-
-        if run_min is None or run_max is None:
-
-            return None, None, "[DEBUG] vote-run z-crop unavailable: no contiguous run with vote count >=1."
-
-
-
-        run_min_initial = int(run_min)
-
-        run_max_initial = int(run_max)
-
-        run_len_initial = int(run_max_initial - run_min_initial + 1)
-
-
-
-        target_len_from_total = int(np.ceil(float(min_total_um) / z_step_um)) if float(min_total_um) > 0 else 1
-
-        target_len = int(max(run_len_initial, target_len_from_total, 1))
-
-        min_down_slices = int(np.ceil(float(min_down_um) / z_step_um)) if float(min_down_um) > 0 else 0
-
-
-
-        z_min = int(run_min_initial)
-
-        z_max = int(run_max_initial)
-
-        needed_total = int(max(0, target_len - run_len_initial))
-
-        down_goal = int(max(needed_total, min_down_slices))
-
-        max_down_possible = int((nz - 1) - z_max)
-
-        down_added = int(min(down_goal, max_down_possible))
-
-        z_max = int(z_max + down_added)
-
-
-
-        cur_len = int(z_max - z_min + 1)
-
-        up_added = 0
-
-        if cur_len < target_len:
-
-            still_needed = int(target_len - cur_len)
-
-            max_up_possible = int(z_min)
-
-            up_added = int(min(still_needed, max_up_possible))
-
-            z_min = int(z_min - up_added)
-
-
-
-        z_min = int(np.clip(z_min, 0, max(0, nz - 1)))
-
-        z_max = int(np.clip(z_max, 0, max(0, nz - 1)))
-
-        if z_min > z_max:
-
-            z_min, z_max = z_max, z_min
-
-
-
-        final_len = int(z_max - z_min + 1)
-
-        final_um = float(final_len * z_step_um)
-
-        dbg_txt = (
-
-            f"[DEBUG] vote-run z-crop (vote>=1 contiguous rule): initial={run_min_initial}..{run_max_initial} "
-
-            f"({run_len_initial} slices, {run_len_initial * z_step_um:.2f}um); "
-
-            f"extended_down={down_added}, extended_up={up_added}; "
-
-            f"final={z_min}..{z_max} ({final_len} slices, {final_um:.2f}um); "
-
-            f"target_min_total_um={float(min_total_um):.2f}."
-
-        )
-
-
-
-        return z_min, z_max, dbg_txt
-
-
-
-    def _compute_z_min_max_slices(self, z_range_um: float):
-
-        z_min, z_max, _ = self._compute_vote_driven_z_bounds(min_total_um=160.0, min_down_um=30.0)
-
-        return z_min, z_max
+        return int(lower), int(upper)
 
 
 
     def _update_z_crop_bounds(self, *_, show_warning: bool = False):
 
-        active_stack = self._get_active_stack_for_z()
-
-        if self._updating_z_widgets or active_stack is None:
+        if self._updating_z_widgets or self._cropped_stack_xy_raw is None:
 
             return
 
-        z_min, z_max, dbg_txt = self._compute_vote_driven_z_bounds(min_total_um=160.0, min_down_um=30.0)
+        try:
+
+            z_range_um = float(self.crop_z.z_range_um.value)
+
+        except Exception:
+
+            return
+
+
+
+        z_min, z_max = self._compute_z_min_max_slices(z_range_um)
 
         if z_min is None or z_max is None:
-
-            if show_warning:
-
-                self.images_output.value = dbg_txt
 
             return
 
@@ -3051,7 +2886,7 @@ class DeviceSegmentationApp:
 
             self._updating_z_widgets = True
 
-            nz = int(active_stack.shape[0])
+            nz = int(self._cropped_stack_xy_raw.shape[0])
 
             self.crop_z.z_min.max = max(0, nz - 1)
 
@@ -3060,10 +2895,6 @@ class DeviceSegmentationApp:
             self.crop_z.z_min.value = int(z_min)
 
             self.crop_z.z_max.value = int(z_max)
-
-            if self._last_z_step_um is not None and float(self._last_z_step_um) > 0:
-
-                self.crop_z.z_range_um.value = float((int(z_max) - int(z_min) + 1) * float(self._last_z_step_um))
 
         finally:
 
@@ -3077,29 +2908,23 @@ class DeviceSegmentationApp:
 
                 self.images_output.value = (
 
-                    f"[WARN] Auto z-bounds slices {z_min}..{z_max} "
+                    f"[WARN] Z-range {z_range_um}um -> slices {z_min}..{z_max} "
 
                     f"does NOT cover geometry sampled best-zs ({self._last_geometry_best_z_min}..{self._last_geometry_best_z_max})."
 
-                    f"{self._geometry_vote_summary_suffix()} {dbg_txt}"
+                    f"{self._geometry_vote_summary_suffix()}"
 
                 )
-
-            else:
-
-                self.images_output.value = dbg_txt
 
 
 
     def _update_z_range_from_slices(self, *_, show_warning: bool = False):
 
-        active_stack = self._get_active_stack_for_z()
-
-        if self._updating_z_widgets or active_stack is None:
+        if self._updating_z_widgets or self._cropped_stack_xy_raw is None:
 
             return
 
-        nz = int(active_stack.shape[0])
+        nz = int(self._cropped_stack_xy_raw.shape[0])
 
         try:
 
@@ -3169,9 +2994,9 @@ class DeviceSegmentationApp:
 
     def _apply_z_crop(self, z_range_um: float = 200.0):
 
-        active_stack = self._get_active_stack_for_z()
+        _ = z_range_um
 
-        if active_stack is None:
+        if self._cropped_stack_xy_raw is None:
 
             self.images_output.value = "[WARN] Create cropped aligned stack first."
 
@@ -3179,47 +3004,23 @@ class DeviceSegmentationApp:
 
 
 
-        nz = int(active_stack.shape[0])
-
-        z_min, z_max, dbg_txt = self._compute_vote_driven_z_bounds(min_total_um=160.0, min_down_um=30.0)
-
-        if z_min is None or z_max is None:
-
-            self.images_output.value = f"[WARN] Cannot determine z_min/z_max. {dbg_txt}"
-
-            return
-
-
-
-        z_min = int(np.clip(z_min, 0, nz - 1))
-
-        z_max = int(np.clip(z_max, 0, nz - 1))
-
-        if z_min > z_max:
-
-            z_min, z_max = z_max, z_min
-
-
-
-        self._cropped_stack_z_raw = active_stack[z_min : z_max + 1]
+        self._cropped_stack_z_raw = self._cropped_stack_xy_raw
 
         self.cropped_xyz = self._cropped_stack_z_raw
 
-        parent_stage_name = "cropped_xy_refocused"
-
         self._register_z_stage_from_parent(
 
-            parent_stage=parent_stage_name,
+            parent_stage="cropped_xy_raw",
 
             stage_name="cropped_xyz",
 
             child_nz=int(self._cropped_stack_z_raw.shape[0]),
 
-            parent_z_min=int(z_min),
+            parent_z_min=0,
 
-            parent_z_max=int(z_max),
+            parent_z_max=int(max(0, self._cropped_stack_z_raw.shape[0] - 1)),
 
-            note="User-selected z crop from geometry-rectified stack.",
+            note="End z-crop disabled; using full geometry-rectified z stack.",
 
         )
 
@@ -3233,41 +3034,7 @@ class DeviceSegmentationApp:
 
         )
 
-        try:
-
-            self._updating_z_widgets = True
-
-            self.crop_z.z_min.value = int(z_min)
-
-            self.crop_z.z_max.value = int(z_max)
-
-            if self._last_z_step_um is not None and float(self._last_z_step_um) > 0:
-
-                self.crop_z.z_range_um.value = float((int(z_max) - int(z_min) + 1) * float(self._last_z_step_um))
-
-        finally:
-
-            self._updating_z_widgets = False
-
-
-
-        mapped_min = self.z_to_original("cropped_xyz", 0)
-
-        mapped_max = self.z_to_original("cropped_xyz", int(max(0, self._cropped_stack_z_raw.shape[0] - 1)))
-
-        if mapped_min is None or mapped_max is None:
-
-            self.images_output.value = f"[OK] Z-cropped stack created (slices {z_min}..{z_max}). {dbg_txt}"
-
-        else:
-
-            self.images_output.value = (
-
-                f"[OK] Z-cropped stack created using vote-run rule (slices {z_min}..{z_max}). "
-
-                f"Original-z approx range: [{mapped_min:.2f}, {mapped_max:.2f}] from source stack. {dbg_txt}"
-
-            )
+        self.images_output.value = "[INFO] End z-crop is disabled; using full geometry-rectified z stack."
 
 
 
@@ -3321,9 +3088,3 @@ class DeviceSegmentationApp:
 
         self.segment_and_view.call_button.enabled = image_ok
 
-
-
-
-def create_device_segmentation_app():
-    app = DeviceSegmentationApp()
-    return app

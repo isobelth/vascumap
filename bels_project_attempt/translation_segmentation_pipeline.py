@@ -2,145 +2,146 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Tuple
-
+import math
 import gc
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import segmentation_models_pytorch as smp
 from monai.inferers import SlidingWindowInferer, SliceInferer
 from monai.networks.nets import UNet
-import segmentation_models_pytorch as smp
 from scipy.ndimage import zoom as ndi_zoom
-from skimage.filters import apply_hysteresis_threshold
 
 try:
     import cupy as cp
-    from cupyx.scipy import ndimage as cpx_ndimage
+    from cupyx.scipy import ndimage
 except Exception:
     cp = None
-    cpx_ndimage = None
+    ndimage = None
+
+try:
+    import dask.array as da
+    from skimage.transform import resize
+except Exception:
+    da = None
+    resize = None
+
+try:
+    from skimage.filters import apply_hysteresis_threshold
+except Exception:
+    apply_hysteresis_threshold = None
 
 
-def image_resizer(
-    stack_input: np.ndarray,
-    src_voxel_um: Tuple[float, float, float],
-    ref_voxel_um: Tuple[float, float, float],
-    order: int = 3,
-    use_gpu: bool = True,
-) -> np.ndarray:
-    stack = np.asarray(stack_input, dtype=np.float32)
-    src = np.array(src_voxel_um, dtype=float)
-    ref = np.array(ref_voxel_um, dtype=float)
-    old_shape = np.array(stack.shape[:3], dtype=float)
-    new_shape = np.maximum(1, np.rint(old_shape * (src / ref))).astype(int)
-    zoom_factors = tuple(float(n) / float(o) for n, o in zip(new_shape, old_shape))
-
-    if all(np.isclose(zf, 1.0) for zf in zoom_factors):
-        return stack.astype(np.float32, copy=False)
-
-    can_gpu = bool(use_gpu and (cp is not None) and (cpx_ndimage is not None))
-    if can_gpu:
-        out = cpx_ndimage.zoom(cp.asarray(stack), zoom=zoom_factors, order=order).get()
-    else:
-        out = ndi_zoom(stack, zoom=zoom_factors, order=order, prefilter=False)
-    return out.astype(np.float32)
+def legacy_scale(arr: np.ndarray) -> np.ndarray:
+    arr = np.array(arr, dtype=np.float32)
+    den = float(arr.max() - arr.min())
+    if den <= 0:
+        return np.zeros_like(arr, dtype=np.float32)
+    return (arr - arr.min()) / den
 
 
-def pix2pix_translation(
-    stack_input: np.ndarray,
-    model_path: str,
-    device: str = "cuda",
-    n_iter: int = 1,
-) -> np.ndarray:
-    class LegacyGenerator(nn.Module):
-        def __init__(self, dropout_p: float = 0.4):
-            super().__init__()
-            self.unet = UNet(
-                spatial_dims=3,
-                in_channels=1,
-                out_channels=1,
-                channels=(32, 64, 128, 256, 512),
-                strides=(1, 2, 2, 2, 1),
-                num_res_units=3,
-                dropout=float(dropout_p),
+def legacy_resize_dask(stack: np.ndarray, rescale_factor) -> np.ndarray:
+    stack = np.asarray(stack)
+    rf = np.asarray(rescale_factor, dtype=float)
+
+    if da is not None and resize is not None:
+        stack_dask = da.from_array(stack, chunks="auto")
+
+        def _resize_block(block):
+            out_shape = (
+                max(1, int(block.shape[0] * rf[0])),
+                max(1, int(block.shape[1] * rf[1])),
+                max(1, int(block.shape[2] * rf[2])),
             )
+            return resize(block, out_shape, order=3)
 
-        def forward(self, x):
-            return F.relu(self.unet(x))
+        rescaled_stack = stack_dask.map_blocks(_resize_block, dtype=stack.dtype)
+        return np.asarray(rescaled_stack.compute(), dtype=np.float32)
 
-    checkpoint = torch.load(model_path, map_location="cpu")
-    state_dict = checkpoint.get("state_dict", checkpoint)
-    gen_items = [(k, v) for k, v in state_dict.items() if k.startswith("generator.")]
+    old_shape = np.array(stack.shape[:3], dtype=float)
+    new_shape = np.maximum(1, (old_shape * rf).astype(int))
+    zoom_factors = tuple(float(n) / float(o) for n, o in zip(new_shape, old_shape))
+    return ndi_zoom(stack, zoom=zoom_factors, order=3, prefilter=False).astype(np.float32)
 
-    if gen_items:
-        gen_sd = {k[len("generator."):]: v for k, v in gen_items}
-    elif "generator" in state_dict and isinstance(state_dict["generator"], dict):
-        gen_sd = state_dict["generator"]
-    else:
-        raise RuntimeError("Could not find generator weights with prefix 'generator.'.")
 
-    gen_sd = {(k[len("module."):] if k.startswith("module.") else k): v for k, v in gen_sd.items()}
-    hp = checkpoint.get("hyper_parameters", {}) if isinstance(checkpoint, dict) else {}
-    dropout_p = float(hp.get("generator_dropout_p", 0.4)) if isinstance(hp, dict) else 0.4
-
-    model = LegacyGenerator(dropout_p=dropout_p)
-    model.load_state_dict(gen_sd, strict=True)
-    model = model.to(device).eval()
-
-    stack = np.asarray(stack_input, dtype=np.float32)
-    denom = float(stack.max() - stack.min())
-    if denom > 0:
-        stack = (stack - float(stack.min())) / denom
-    else:
-        stack = np.zeros_like(stack, dtype=np.float32)
-
-    input_tensor = torch.tensor(stack[None, None, ...], device="cpu").float()
-    inferer = SlidingWindowInferer(
-        roi_size=(32, 512, 512),
-        overlap=(0.75, 0.25, 0.25),
-        sw_batch_size=1,
-        sw_device=device,
-        device="cpu",
-        progress=True,
-    )
-
-    with torch.no_grad(), torch.amp.autocast(device_type="cuda"):
-        preds = torch.stack(
-            [inferer(inputs=input_tensor, network=model).to("cpu") for _ in range(max(1, int(n_iter)))]
+class Generator(nn.Module):
+    def __init__(self, dropout_p=0.4):
+        super().__init__()
+        self.unet = UNet(
+            spatial_dims=3,
+            in_channels=1,
+            out_channels=1,
+            channels=(32, 64, 128, 256, 512),
+            strides=(1, 2, 2, 2, 1),
+            num_res_units=3,
+            dropout=dropout_p,
         )
-        preds = torch.clip(preds, 0, 1)
-        preds = torch.mean(preds, dim=0)
 
-    out = preds.squeeze().cpu().numpy().astype(np.float32)
-    model.to("cpu")
-    del input_tensor, preds
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
-    return out
+    def forward(self, x):
+        x = self.unet(x)
+        x = F.relu(x)
+        return x
 
 
-def u_net_segmentation(stack_input: np.ndarray, model_path: str, device: str = "cuda") -> Tuple[np.ndarray, np.ndarray]:
-    def _adapt_input_conv(in_chans, conv_weight):
-        conv_type = conv_weight.dtype
-        conv_weight = conv_weight.float()
-        o_ch, i_ch, k_h, k_w = conv_weight.shape
-        if in_chans == 1:
-            if i_ch > 3:
-                conv_weight = conv_weight.reshape(o_ch, i_ch // 3, 3, k_h, k_w)
-                conv_weight = conv_weight.sum(dim=2, keepdim=False)
-            else:
-                conv_weight = conv_weight.sum(dim=1, keepdim=True)
-        elif in_chans != 3:
-            repeat = int(np.ceil(in_chans / 3))
-            conv_weight = conv_weight.repeat(1, repeat, 1, 1)[:, :in_chans, :, :]
-            conv_weight *= (3 / float(in_chans))
-        return conv_weight.to(conv_type)
+class Discriminator(nn.Module):
+    def __init__(self, dropout_p=0.4):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Conv3d(2, 64, kernel_size=4, stride=(1, 2, 2), padding=(1, 1, 1)),
+            nn.BatchNorm3d(64),
+            nn.LeakyReLU(0.2),
+            nn.Conv3d(64, 128, kernel_size=4, stride=(1, 2, 2), padding=(1, 1, 1)),
+            nn.BatchNorm3d(128),
+            nn.LeakyReLU(0.2),
+            nn.Conv3d(128, 256, kernel_size=4, stride=(2, 2, 2), padding=(1, 1, 1)),
+            nn.BatchNorm3d(256),
+            nn.LeakyReLU(0.2),
+            nn.Conv3d(256, 512, kernel_size=4, stride=(2, 2, 2), padding=(1, 1, 1)),
+            nn.BatchNorm3d(512),
+            nn.LeakyReLU(0.2),
+            nn.Conv3d(512, 1, kernel_size=4, stride=1, padding=1),
+            nn.Sigmoid(),
+        )
 
-    model = smp.Unet(encoder_name="mit_b5", classes=1, in_channels=3, encoder_weights=None)
+    def forward(self, x):
+        return self.model(x)
+
+
+class Pix2Pix(nn.Module):
+    def __init__(self, generator_dropout_p=0.4, discriminator_dropout_p=0.4):
+        super().__init__()
+        self.generator = Generator(dropout_p=generator_dropout_p)
+        self.discriminator = Discriminator(dropout_p=discriminator_dropout_p)
+
+    def forward(self, x):
+        return self.generator(x)
+
+
+def adapt_input_conv(in_chans, conv_weight):
+    conv_type = conv_weight.dtype
+    conv_weight = conv_weight.float()
+    O, I, J, K = conv_weight.shape
+    if in_chans == 1:
+        if I > 3:
+            assert conv_weight.shape[1] % 3 == 0
+            conv_weight = conv_weight.reshape(O, I // 3, 3, J, K)
+            conv_weight = conv_weight.sum(dim=2, keepdim=False)
+        else:
+            conv_weight = conv_weight.sum(dim=1, keepdim=True)
+    elif in_chans != 3:
+        if I != 3:
+            raise NotImplementedError("Weight format not supported by conversion.")
+        repeat = int(math.ceil(in_chans / 3))
+        conv_weight = conv_weight.repeat(1, repeat, 1, 1)[:, :in_chans, :, :]
+        conv_weight *= (3 / float(in_chans))
+    return conv_weight.to(conv_type)
+
+
+def adapt_input_model(model):
     if hasattr(model, "encoder") and hasattr(model.encoder, "patch_embed1"):
-        new_weights = _adapt_input_conv(in_chans=1, conv_weight=model.encoder.patch_embed1.proj.weight)
+        new_weights = adapt_input_conv(in_chans=1, conv_weight=model.encoder.patch_embed1.proj.weight)
         model.encoder.patch_embed1.proj = torch.nn.Conv2d(
             in_channels=1,
             out_channels=64,
@@ -150,19 +151,74 @@ def u_net_segmentation(stack_input: np.ndarray, model_path: str, device: str = "
         )
         with torch.no_grad():
             model.encoder.patch_embed1.proj.weight = torch.nn.parameter.Parameter(new_weights)
+    return model
+
+
+def load_pix2pix(model_path, device="cuda"):
+    checkpoint = torch.load(model_path, map_location="cpu")
+    model = Pix2Pix()
+    model.load_state_dict(checkpoint["state_dict"], strict=True)
+    return model.eval()
+
+
+def load_segmentation_model(model_path, device="cuda"):
+    model = smp.Unet(encoder_name="mit_b5", classes=1, in_channels=3, encoder_weights=None)
+    model = adapt_input_model(model)
 
     checkpoint = torch.load(model_path, map_location="cpu")
     if "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
     elif "state_dict" in checkpoint:
         state_dict = checkpoint["state_dict"]
-        model.load_state_dict({(k[6:] if k.startswith("model.") else k): v for k, v in state_dict.items()})
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith("model."):
+                new_state_dict[k[6:]] = v
+            else:
+                new_state_dict[k] = v
+        model.load_state_dict(new_state_dict)
     else:
         model.load_state_dict(checkpoint)
+    return model.eval()
 
-    model = model.to(device).eval()
-    tensor = torch.tensor(np.asarray(stack_input, dtype=np.float32)[None, None, ...], device="cpu").float()
-    tensor_shape = tensor.shape
+
+def predict_pix2pix(model_p2p, stack_bf, device, n_iter=1):
+    input_p2p_tensor = torch.tensor(stack_bf[None, None, ...], device="cpu").float()
+
+    inferer = SlidingWindowInferer(
+        roi_size=(32, 512, 512),
+        overlap=(0.75, 0.25, 0.25),
+        sw_batch_size=1,
+        sw_device=device,
+        device="cpu",
+        progress=True,
+    )
+
+    model_p2p.to(device)
+
+    autocast_device = "cuda" if "cuda" in str(device).lower() else "cpu"
+    with torch.no_grad(), torch.amp.autocast(device_type=autocast_device):
+        reconstruction_mean = torch.stack(
+            [inferer(inputs=input_p2p_tensor, network=model_p2p).to("cpu") for _ in range(max(1, int(n_iter)))]
+        )
+        reconstruction_mean = torch.clip(reconstruction_mean, 0, 1)
+        reconstruction_mean = torch.mean(reconstruction_mean, dim=0)
+
+    vessel_pred = reconstruction_mean.squeeze().cpu().numpy()
+
+    model_p2p.to("cpu")
+    del input_p2p_tensor, reconstruction_mean
+    if "cuda" in str(device).lower() and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return vessel_pred
+
+
+def predict_mask_ortho(model_smp, vessel_pred_iso, device):
+    vessel_pred_tensor = torch.tensor(vessel_pred_iso[None, None, ...], device="cpu").float()
+    tensor_shape = vessel_pred_tensor.shape
+
+    model_smp.to(device)
 
     axial_inferer = SliceInferer(
         roi_size=(1024, 1024),
@@ -173,14 +229,17 @@ def u_net_segmentation(stack_input: np.ndarray, model_path: str, device: str = "
         device="cpu",
         sw_device=device,
     )
+
     with torch.no_grad():
-        proba_axial = torch.sigmoid(axial_inferer(tensor, model)).squeeze().to("cpu").numpy()
+        output3D_axial = torch.sigmoid(axial_inferer(vessel_pred_tensor, model_smp))
+
+    vessel_axial = output3D_axial.squeeze().to("cpu").numpy()
 
     if tensor_shape[2] < 256:
         pad_d = 256 - tensor_shape[2]
         pad_pre = pad_d // 2
         pad_post = pad_d - pad_pre
-        tensor = F.pad(tensor, (0, 0, 0, 0, pad_pre, pad_post), mode="constant", value=-1)
+        vessel_pred_tensor = F.pad(vessel_pred_tensor, (0, 0, 0, 0, pad_pre, pad_post), mode="constant", value=-1)
 
     coronal_inferer = SliceInferer(
         roi_size=(256, 256),
@@ -192,7 +251,8 @@ def u_net_segmentation(stack_input: np.ndarray, model_path: str, device: str = "
         device="cpu",
         sw_device=device,
     )
-    sagittal_inferer = SliceInferer(
+
+    sagital_inferer = SliceInferer(
         roi_size=(256, 256),
         sw_batch_size=32,
         spatial_dim=2,
@@ -202,33 +262,100 @@ def u_net_segmentation(stack_input: np.ndarray, model_path: str, device: str = "
         device="cpu",
         sw_device=device,
     )
+
     with torch.no_grad():
-        proba_cor = torch.sigmoid(coronal_inferer(tensor, model)).squeeze().to("cpu").numpy()
-        proba_sag = torch.sigmoid(sagittal_inferer(tensor, model)).squeeze().to("cpu").numpy()
+        output3D_coronal = torch.sigmoid(coronal_inferer(vessel_pred_tensor, model_smp))
+        output3D_sagital = torch.sigmoid(sagital_inferer(vessel_pred_tensor, model_smp))
 
     if tensor_shape[2] < 256:
         pad_d = 256 - tensor_shape[2]
         pad_pre = pad_d // 2
-        proba_cor = proba_cor[pad_pre : pad_pre + tensor_shape[2], :, :]
-        proba_sag = proba_sag[pad_pre : pad_pre + tensor_shape[2], :, :]
-
-    prob_map = np.mean(np.array([proba_axial, proba_cor, proba_sag]), axis=0)
-
-    if cpx_ndimage is not None and cp is not None:
-        filt = cpx_ndimage.median_filter(cp.asarray(prob_map), size=7).get()
+        vessel_coronal = output3D_coronal.squeeze().to("cpu").numpy()[pad_pre : pad_pre + tensor_shape[2], :, :]
+        vessel_sagital = output3D_sagital.squeeze().to("cpu").numpy()[pad_pre : pad_pre + tensor_shape[2], :, :]
     else:
-        from scipy.ndimage import median_filter
+        vessel_coronal = output3D_coronal.squeeze().to("cpu").numpy()
+        vessel_sagital = output3D_sagital.squeeze().to("cpu").numpy()
 
-        filt = median_filter(prob_map, size=7)
+    vessel_proba = np.mean(np.array([vessel_axial, vessel_coronal, vessel_sagital]), axis=0)
 
-    seg_mask = apply_hysteresis_threshold(filt, 0.2, 0.5).astype(np.uint8)
-
-    model.to("cpu")
-    del tensor
-    if torch.cuda.is_available():
+    model_smp.to("cpu")
+    del vessel_pred_tensor, output3D_axial, output3D_coronal, output3D_sagital
+    if "cuda" in str(device).lower() and torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
-    return prob_map.astype(np.float32), seg_mask
+
+    return vessel_proba
+
+
+def cupy_chunk_processing(volume, processing_func, chunk_size=(64, 512, 512), overlap=(15, 15, 15), *args, **kwargs):
+    if cp is None or ndimage is None:
+        raise RuntimeError("CuPy is required for legacy ortho mask processing")
+
+    result = np.empty_like(volume)
+    pool = cp.get_default_memory_pool()
+
+    z_steps = range(0, volume.shape[0], chunk_size[0])
+    for z in z_steps:
+        for y in range(0, volume.shape[1], chunk_size[1]):
+            for x in range(0, volume.shape[2], chunk_size[2]):
+                z_start = max(0, z - overlap[0])
+                z_end = min(volume.shape[0], z + chunk_size[0] + overlap[0])
+                y_start = max(0, y - overlap[1])
+                y_end = min(volume.shape[1], y + chunk_size[1] + overlap[1])
+                x_start = max(0, x - overlap[2])
+                x_end = min(volume.shape[2], x + chunk_size[2] + overlap[2])
+
+                chunk = volume[z_start:z_end, y_start:y_end, x_start:x_end]
+                chunk_gpu = cp.asarray(chunk)
+
+                filtered_chunk = processing_func(chunk_gpu, *args, **kwargs)
+
+                w_z_start = z - z_start
+                w_z_end = w_z_start + chunk_size[0]
+                w_y_start = y - y_start
+                w_y_end = w_y_start + chunk_size[1]
+                w_x_start = x - x_start
+                w_x_end = w_x_start + chunk_size[2]
+
+                valid_chunk = filtered_chunk[
+                    w_z_start : min(w_z_end, filtered_chunk.shape[0]),
+                    w_y_start : min(w_y_end, filtered_chunk.shape[1]),
+                    w_x_start : min(w_x_end, filtered_chunk.shape[2]),
+                ].get()
+
+                result_z = min(z, result.shape[0])
+                result_y = min(y, result.shape[1])
+                result_x = min(x, result.shape[2])
+
+                result[
+                    result_z : result_z + valid_chunk.shape[0],
+                    result_y : result_y + valid_chunk.shape[1],
+                    result_x : result_x + valid_chunk.shape[2],
+                ] = valid_chunk
+
+                del chunk_gpu, filtered_chunk
+                pool.free_all_blocks()
+
+    return result
+
+
+def median_filter_3d_gpu(volume, size=3, chunk_size=(64, 64, 64)):
+    if isinstance(size, int):
+        overlap = (size // 2, size // 2, size // 2)
+    else:
+        overlap = (size[0] // 2, size[1] // 2, size[2] // 2)
+    return cupy_chunk_processing(volume, ndimage.median_filter, chunk_size=chunk_size, overlap=overlap, size=size)
+
+
+def process_vessel_mask(vessel_proba, ortho=False):
+    if apply_hysteresis_threshold is None:
+        raise RuntimeError("scikit-image is required for hysteresis thresholding")
+    if ortho:
+        vessel_filtered = median_filter_3d_gpu(vessel_proba, size=7, chunk_size=(32, 1024, 1024))
+        vessel_out = apply_hysteresis_threshold(vessel_filtered, 0.2, 0.5)
+    else:
+        vessel_out = apply_hysteresis_threshold(vessel_proba, 0.1, 0.5)
+    return vessel_out
 
 
 def run_translation_and_segmentation(
@@ -243,6 +370,8 @@ def run_translation_and_segmentation(
     device_width_um: float = 30.0,
     use_gpu: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    del use_gpu
+
     def _crop_xy_equal_margin(arr: np.ndarray, crop_y_px: int, crop_x_px: int) -> np.ndarray:
         out = np.asarray(arr)
         if out.ndim < 3:
@@ -264,55 +393,41 @@ def run_translation_and_segmentation(
     if stack_input_raw.ndim != 3:
         raise ValueError(f"Expected cropped_z_stack with shape (Z,Y,X), got {stack_input_raw.shape}")
 
-    stack_input_ref = image_resizer(
-        stack_input=stack_input_raw,
-        src_voxel_um=tuple(float(v) for v in src_voxel_um),
-        ref_voxel_um=tuple(float(v) for v in ref_voxel_um),
-        order=3,
-        use_gpu=bool(use_gpu),
-    )
+    src = np.asarray(src_voxel_um, dtype=float)
+    ref = np.asarray(ref_voxel_um, dtype=float)
+    iso = np.asarray(iso_voxel_um, dtype=float)
 
-    translated_ref = pix2pix_translation(
-        stack_input=stack_input_ref,
-        model_path=str(pix2pix_model_path),
-        device=device,
-        n_iter=int(max(1, n_iter)),
-    )
+    # Match legacy pipeline flow: convert to legacy reference voxel grid first
+    stack_input_ref = legacy_resize_dask(stack_input_raw, src / ref)
+    stack_input_ref = legacy_scale(stack_input_ref)
 
-    translated_iso = image_resizer(
-        stack_input=translated_ref,
-        src_voxel_um=tuple(float(v) for v in ref_voxel_um),
-        ref_voxel_um=tuple(float(v) for v in iso_voxel_um),
-        order=3,
-        use_gpu=bool(use_gpu),
-    ).astype(np.float32)
+    model_p2p = load_pix2pix(str(pix2pix_model_path), device=device)
+    vessel_pred_ref = predict_pix2pix(model_p2p, stack_input_ref, device=device, n_iter=max(1, int(n_iter)))
 
-    seg_prob_map, seg_mask = u_net_segmentation(
-        stack_input=translated_iso,
-        model_path=str(seg_model_path),
-        device=device,
-    )
+    # Match legacy isotropic conversion step
+    vessel_pred_iso = legacy_resize_dask(vessel_pred_ref, ref / iso).astype(np.float32)
 
-    try:
-        width_um = float(device_width_um)
-    except Exception as exc:
-        raise ValueError(f"device_width_um must be numeric, got {device_width_um!r}") from exc
+    model_smp = load_segmentation_model(str(seg_model_path), device=device)
+    vessel_proba_iso = predict_mask_ortho(model_smp, vessel_pred_iso, device=device).astype(np.float32)
+    vessel_mask_iso = process_vessel_mask(vessel_proba_iso, ortho=True).astype(np.uint8)
 
+    width_um = float(device_width_um)
     if width_um < 0:
         raise ValueError(f"device_width_um must be >= 0, got {width_um}")
 
-    _, y_um_iso, x_um_iso = (float(iso_voxel_um[0]), float(iso_voxel_um[1]), float(iso_voxel_um[2]))
+    y_um_iso = float(iso[1])
+    x_um_iso = float(iso[2])
     if y_um_iso <= 0 or x_um_iso <= 0:
         raise ValueError(f"iso_voxel_um must have positive y/x spacing, got {iso_voxel_um}")
 
-    crop_y = int(np.rint(width_um / y_um_iso))
-    crop_x = int(np.rint(width_um / x_um_iso))
+    crop_y = int(np.ceil(width_um / y_um_iso))
+    crop_x = int(np.ceil(width_um / x_um_iso))
 
-    translated_iso = _crop_xy_equal_margin(translated_iso, crop_y_px=crop_y, crop_x_px=crop_x).astype(np.float32)
-    seg_prob_map = _crop_xy_equal_margin(seg_prob_map, crop_y_px=crop_y, crop_x_px=crop_x).astype(np.float32)
-    seg_mask = _crop_xy_equal_margin(seg_mask, crop_y_px=crop_y, crop_x_px=crop_x).astype(np.uint8)
+    translated_iso = _crop_xy_equal_margin(vessel_pred_iso, crop_y_px=crop_y, crop_x_px=crop_x).astype(np.float32)
+    seg_prob_map = _crop_xy_equal_margin(vessel_proba_iso, crop_y_px=crop_y, crop_x_px=crop_x).astype(np.float32)
+    seg_mask = _crop_xy_equal_margin(vessel_mask_iso, crop_y_px=crop_y, crop_x_px=crop_x).astype(np.uint8)
 
-    return translated_iso, np.asarray(seg_prob_map, dtype=np.float32), np.asarray(seg_mask, dtype=np.uint8)
+    return translated_iso, seg_prob_map, seg_mask
 
 
 def default_checkpoints(repo_root: str | Path) -> Tuple[str, str]:
