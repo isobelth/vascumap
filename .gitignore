@@ -20,6 +20,8 @@ results/
 # Zarr (directory-based)
 *.zarr/
 
+*.npy
+
 # Common outputs
 **/output/
 **/outputs/
