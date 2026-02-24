@@ -22,125 +22,6 @@ def read_voxel_size_um(
 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """Return voxel size tuple (z_um, y_um, x_um) from LIF or TIFF metadata."""
 
-    def _to_float(value):
-        try:
-            if isinstance(value, (list, tuple)) and len(value) > 0:
-                value = value[0]
-            arr = np.asarray(value)
-            if arr.ndim > 0:
-                value = arr.flat[0]
-            vf = float(value)
-            if not np.isfinite(vf):
-                return None
-            return vf
-        except Exception:
-            return None
-
-    def _as_um(value):
-        vf = _to_float(value)
-        if vf is None or vf == 0:
-            return None
-        av = abs(vf)
-        return vf * 1e6 if av < 1e-3 else vf
-
-    def step(axis, xa):
-        # Keep old behavior first (exact axis key), then robust fallback.
-        try:
-            coords = xa.coords
-            if axis in coords and coords[axis].size >= 2:
-                return float(coords[axis][1] - coords[axis][0])
-        except Exception:
-            pass
-
-        coords = getattr(xa, "coords", None)
-        if coords is None:
-            return None
-
-        axis_key = str(axis).lower()
-        coord = None
-        try:
-            for key in coords.keys():
-                if str(key).lower() == axis_key:
-                    coord = coords[key]
-                    break
-        except Exception:
-            return None
-
-        if coord is None:
-            return None
-
-        try:
-            size = getattr(coord, "size", None)
-            if size is not None:
-                if int(size) < 2:
-                    return None
-            elif len(coord) < 2:
-                return None
-            return float(coord[1] - coord[0])
-        except Exception:
-            return None
-
-    def _extract_axis_um_from_mapping(mapping, axis):
-        if not isinstance(mapping, dict):
-            return None
-        axis_lc = axis.lower()
-        tokens = ("spacing", "scale", "voxel", "pixel", "resolution", "step")
-        for key, value in mapping.items():
-            key_lc = str(key).lower()
-            if axis_lc in key_lc and any(tok in key_lc for tok in tokens):
-                v_um = _as_um(value)
-                if v_um is not None:
-                    return v_um
-        return None
-
-    def _extract_axis_um_from_dims(dims, axis):
-        if dims is None:
-            return None
-        axis_lc = axis.lower()
-
-        try:
-            dim_items = list(dims.values()) if isinstance(dims, dict) else list(dims)
-        except Exception:
-            return None
-
-        for dim in dim_items:
-            if dim is None:
-                continue
-
-            dim_name = None
-            for nm in ("name", "axis", "dim", "key"):
-                if hasattr(dim, nm):
-                    try:
-                        dim_name = getattr(dim, nm)
-                        break
-                    except Exception:
-                        pass
-            if dim_name is None and isinstance(dim, dict):
-                for nm in ("name", "axis", "dim", "key"):
-                    if nm in dim:
-                        dim_name = dim.get(nm)
-                        break
-
-            if dim_name is None:
-                continue
-            if axis_lc not in str(dim_name).lower():
-                continue
-
-            for field in ("spacing", "scale", "voxel", "pixel", "resolution", "step"):
-                raw_val = None
-                if hasattr(dim, field):
-                    try:
-                        raw_val = getattr(dim, field)
-                    except Exception:
-                        raw_val = None
-                if raw_val is None and isinstance(dim, dict):
-                    raw_val = dim.get(field)
-                v_um = _as_um(raw_val)
-                if v_um is not None:
-                    return v_um
-
-        return None
-
     z_um = y_um = x_um = None
 
     if source_is_lif:
@@ -154,91 +35,56 @@ def read_voxel_size_um(
                     return (None, None, None)
                 img = lif.images[idx]
 
-                # Primary path: liffile exposes physical coordinates via img.coords
-                # without requiring xarray.
-                try:
-                    icoords = getattr(img, "coords", None)
-                    if isinstance(icoords, dict):
-                        x_coord = icoords.get("X")
-                        y_coord = icoords.get("Y")
-                        z_coord = icoords.get("Z")
-                        if x_coord is not None and len(x_coord) >= 2:
-                            x_um = float(x_coord[1] - x_coord[0]) * 1e6
-                        if y_coord is not None and len(y_coord) >= 2:
-                            y_um = float(y_coord[1] - y_coord[0]) * 1e6
-                        if z_coord is not None and len(z_coord) >= 2:
-                            z_um = float(z_coord[1] - z_coord[0]) * 1e6
-                except Exception:
-                    pass
-
-                xa = None
-                try:
-                    xa = img.asxarray()
-                except Exception:
-                    xa = None
-
-                if xa is not None and (x_um is None or y_um is None or z_um is None):
-                    x_step = step("X", xa)
-                    y_step = step("Y", xa)
-                    z_step = step("Z", xa)
-
-                    if x_um is None and x_step is not None:
-                        x_um = x_step * 1e6
-                    if y_um is None and y_step is not None:
-                        y_um = y_step * 1e6
-                    if z_um is None and z_step is not None:
-                        z_um = z_step * 1e6
-
-                # Fallbacks for files where xarray is unavailable or coords are absent/incomplete.
-                if x_um is None or y_um is None or z_um is None:
-                    xa_attrs = getattr(xa, "attrs", None) if xa is not None else None
-                    img_attrs = getattr(img, "attrs", None)
-
-                    if x_um is None:
-                        x_um = _extract_axis_um_from_dims(getattr(img, "dims", None), "x")
-                    if y_um is None:
-                        y_um = _extract_axis_um_from_dims(getattr(img, "dims", None), "y")
-                    if z_um is None:
-                        z_um = _extract_axis_um_from_dims(getattr(img, "dims", None), "z")
-
-                    candidates = [
-                        xa_attrs if isinstance(xa_attrs, dict) else None,
-                        img_attrs if isinstance(img_attrs, dict) else None,
-                        getattr(img, "scale", None),
-                        getattr(img, "scales", None),
-                        getattr(img, "spacing", None),
-                        getattr(img, "spacings", None),
-                        getattr(img, "voxel_size", None),
-                        getattr(img, "voxel_sizes", None),
-                        getattr(img, "resolution", None),
-                        getattr(img, "resolutions", None),
-                    ]
-
-                    for cand in candidates:
-                        if cand is None:
+                # Primary path (preferred): LifImage.coords from liffile.
+                coords = getattr(img, "coords", None)
+                if isinstance(coords, dict):
+                    for axis in ("X", "Y", "Z"):
+                        coord = coords.get(axis)
+                        if coord is None:
                             continue
-                        if isinstance(cand, dict):
-                            if x_um is None:
-                                x_um = _extract_axis_um_from_mapping(cand, "x")
-                            if y_um is None:
-                                y_um = _extract_axis_um_from_mapping(cand, "y")
-                            if z_um is None:
-                                z_um = _extract_axis_um_from_mapping(cand, "z")
-                        else:
-                            try:
-                                cand_dict = dict(cand)
-                            except Exception:
-                                cand_dict = None
-                            if cand_dict is not None:
-                                if x_um is None:
-                                    x_um = _extract_axis_um_from_mapping(cand_dict, "x")
-                                if y_um is None:
-                                    y_um = _extract_axis_um_from_mapping(cand_dict, "y")
-                                if z_um is None:
-                                    z_um = _extract_axis_um_from_mapping(cand_dict, "z")
+                        try:
+                            if len(coord) < 2:
+                                continue
+                            step_um = abs(float(coord[1] - coord[0])) * 1e6
+                            if not np.isfinite(step_um) or step_um <= 0:
+                                continue
+                            if axis == "X":
+                                x_um = step_um
+                            elif axis == "Y":
+                                y_um = step_um
+                            else:
+                                z_um = step_um
+                        except Exception:
+                            continue
 
-                        if x_um is not None and y_um is not None and z_um is not None:
-                            break
+                # Minimal fallback: xarray coordinates if available.
+                if x_um is None or y_um is None or z_um is None:
+                    try:
+                        xa = img.asxarray()
+                        xa_coords = getattr(xa, "coords", None)
+                        if xa_coords is not None:
+                            for axis in ("X", "Y", "Z"):
+                                coord = xa_coords.get(axis) if axis in xa_coords else None
+                                if coord is None:
+                                    for key in xa_coords.keys():
+                                        if str(key).lower() == axis.lower():
+                                            coord = xa_coords[key]
+                                            break
+                                if coord is None:
+                                    continue
+                                if len(coord) < 2:
+                                    continue
+                                step_um = abs(float(coord[1] - coord[0])) * 1e6
+                                if not np.isfinite(step_um) or step_um <= 0:
+                                    continue
+                                if axis == "X" and x_um is None:
+                                    x_um = step_um
+                                elif axis == "Y" and y_um is None:
+                                    y_um = step_um
+                                elif axis == "Z" and z_um is None:
+                                    z_um = step_um
+                    except Exception:
+                        pass
         except Exception:
             return (None, None, None)
 
