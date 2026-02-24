@@ -1,8 +1,10 @@
 from typing import Literal, Dict, List
+import argparse
 import numpy as np
 import napari
 import math
 from pathlib import Path
+from liffile import LifFile
 from gui_device_segmentation import DeviceSegmentationApp
 import torch
 from warnings import filterwarnings
@@ -15,7 +17,6 @@ from utils import scale, resize_dask
 filterwarnings('ignore')
 
 class VascuMap:
-    
     def __init__(
         self,
         pix2pix_model_path: str = r"C:\Users\taylorhearn\git_repos\vascumap\luca_models\epoch=117-val_g_psnr=20.47-val_g_ssim=0.62.ckpt",
@@ -266,9 +267,6 @@ class VascuMap:
         self.vessel_mask_iso = self.vessel_mask_iso[z_start_final:z_stop_final, pixels_to_remove:current_x_pixels-pixels_to_remove, pixels_to_remove:current_y_pixels-pixels_to_remove]
         np.save(f"{name_prefix}_vessel_mask_iso_{run_suffix}_cropped.npy", self.vessel_mask_iso)        
 
-        
-
-
         if self.use_device_segmentation_app:
             viewer = napari.Viewer()
             viewer.add_image(self.vessel_proba_iso)
@@ -300,35 +298,80 @@ class VascuMap:
         self.postprocess()
         
 if __name__ == "__main__":
-    source_dir = Path(r"Z:\Bel\Vascumap_Example_Lifs\training_data\original_images")
-    image_paths = sorted(
-        [p for p in source_dir.iterdir() if p.is_file() and p.suffix.lower() in (".lif", ".tif", ".tiff")]
+    parser = argparse.ArgumentParser(description="Run VascuMap in GUI or no-GUI mode.")
+    parser.add_argument("--no-gui", action="store_true", help="Run in no-GUI batch mode.")
+    parser.add_argument(
+        "--image-dir",
+        type=str,
+        default=None,
+        help="Directory with .lif/.tif/.tiff files (required with --no-gui).",
     )
+    args = parser.parse_args()
 
-    if len(image_paths) == 0:
-        raise FileNotFoundError(f"No .lif/.tif/.tiff files found in: {source_dir}")
+    if not args.no_gui:
+        vascumap = VascuMap(use_device_segmentation_app=True)
+        vascumap.pipeline()
+    else:
+        if args.image_dir is None:
+            raise ValueError("--image-dir is required when --no-gui is set.")
 
-    print(f"Found {len(image_paths)} files. Running non-GUI pipeline...")
-    failures = []
+        source_dir = Path(args.image_dir)
+        if (not source_dir.exists()) or (not source_dir.is_dir()):
+            raise ValueError(f"--image-dir must be an existing directory: {source_dir}")
 
-    for i, image_path in enumerate(image_paths, start=1):
-        print(f"[{i}/{len(image_paths)}] Processing: {image_path.name}")
-        try:
-            vascumap = VascuMap(
-                use_device_segmentation_app=False,
-                image_source_path=str(image_path),
-                device_width_um=35.0,
-            )
-            vascumap.pipeline()
-            # vascumap.preprocess()
-            # vascumap.model_inference(device="cuda")
-            # vascumap.postprocess()
-        except Exception as exc:
-            failures.append((str(image_path), str(exc)))
-            print(f"[FAILED] {image_path.name}: {exc}")
+        image_paths = sorted(
+            [p for p in source_dir.iterdir() if p.is_file() and p.suffix.lower() in (".lif", ".tif", ".tiff")]
+        )
 
-    print(f"Batch complete. Success: {len(image_paths) - len(failures)}, Failed: {len(failures)}")
-    if failures:
-        print("Failed files:")
-        for fp, msg in failures:
-            print(f"- {fp} -> {msg}")
+        if len(image_paths) == 0:
+            raise FileNotFoundError(f"No .lif/.tif/.tiff files found in: {source_dir}")
+
+        print(f"Found {len(image_paths)} files. Running non-GUI pipeline...")
+        failures = []
+        total_runs = 0
+        successes = 0
+
+        for i, image_path in enumerate(image_paths, start=1):
+            print(f"[{i}/{len(image_paths)}] Processing: {image_path.name}")
+
+            if image_path.suffix.lower() == ".lif":
+                try:
+                    with LifFile(image_path) as lif:
+                        n_images = len(lif.images)
+                except Exception as exc:
+                    failures.append((str(image_path), f"Could not inspect .lif images: {exc}"))
+                    print(f"[FAILED] {image_path.name}: Could not inspect .lif images: {exc}")
+                    continue
+
+                for idx in range(n_images):
+                    total_runs += 1
+                    print(f"  -> LIF image index {idx + 1}/{n_images}")
+                    try:
+                        vascumap = VascuMap(
+                            use_device_segmentation_app=False,
+                            image_source_path=str(image_path),
+                            image_index=idx,
+                        )
+                        vascumap.pipeline()
+                        successes += 1
+                    except Exception as exc:
+                        failures.append((f"{image_path} (image_index={idx})", str(exc)))
+                        print(f"[FAILED] {image_path.name} (image_index={idx}): {exc}")
+            else:
+                total_runs += 1
+                try:
+                    vascumap = VascuMap(
+                        use_device_segmentation_app=False,
+                        image_source_path=str(image_path),
+                    )
+                    vascumap.pipeline()
+                    successes += 1
+                except Exception as exc:
+                    failures.append((str(image_path), str(exc)))
+                    print(f"[FAILED] {image_path.name}: {exc}")
+
+        print(f"Batch complete. Total runs: {total_runs}, Success: {successes}, Failed: {len(failures)}")
+        if failures:
+            print("Failed files:")
+            for fp, msg in failures:
+                print(f"- {fp} -> {msg}")
