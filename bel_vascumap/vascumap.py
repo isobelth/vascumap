@@ -50,6 +50,8 @@ class VascuMap:
         self.pixel_size_um = None
         self.z_votes = None
         self.image_name = None
+        self.mask_central_region_enabled = False
+        self.cropped_organoid_mask_xy = None
         self.initial_z_range = None
         self._pre_z_start_global = None
         self._pre_z_um = None
@@ -57,7 +59,11 @@ class VascuMap:
         if self.use_device_segmentation_app:
             self.app = DeviceSegmentationApp()
             napari.run()
-            self.cropped_stack, self.device_width_um, self.pixel_size_um, self.z_votes, self.image_name = self.app.get_cropped_outputs()
+            outputs = self.app.get_cropped_outputs()
+            self.cropped_stack, self.device_width_um, self.pixel_size_um, self.z_votes, self.image_name = outputs[:5]
+            if len(outputs) >= 7:
+                self.mask_central_region_enabled = bool(outputs[5])
+                self.cropped_organoid_mask_xy = outputs[6]
         else:
             if image_source_path is None:
                 raise ValueError("When use_device_segmentation_app is False, image_source_path is required and must point to a .tif/.tiff/.lif file.")
@@ -67,13 +73,11 @@ class VascuMap:
                 raise ValueError("image_source_path must exist and be a .tif/.tiff/.lif file.")
 
             self.app = DeviceSegmentationApp(enable_gui=False)
-            (
-                self.cropped_stack,
-                self.device_width_um,
-                self.pixel_size_um,
-                self.z_votes,
-                self.image_name,
-            ) = self.app.run_automatic(image_source=src, image_index=int(image_index), device_width_um=float(device_width_um))
+            outputs = self.app.run_automatic(image_source=src, image_index=int(image_index), device_width_um=float(device_width_um))
+            self.cropped_stack, self.device_width_um, self.pixel_size_um, self.z_votes, self.image_name = outputs[:5]
+            if len(outputs) >= 7:
+                self.mask_central_region_enabled = bool(outputs[5])
+                self.cropped_organoid_mask_xy = outputs[6]
        
     def preprocess(self, cropped_stack: np.ndarray = None, pixel_size_um: Dict = None, z_votes: List = None, min_span_um: float = 160.0
     ) -> np.array:
@@ -204,6 +208,28 @@ class VascuMap:
         """
         if self.initial_z_range is None or self._pre_z_start_global is None or self._pre_z_um is None:
             return
+
+        if self.mask_central_region_enabled and self.cropped_organoid_mask_xy is not None:
+            mask_xy = np.asarray(self.cropped_organoid_mask_xy, dtype=np.float32)
+            if mask_xy.ndim == 2 and mask_xy.size > 0:
+                target_h = int(self.vessel_mask_iso.shape[1])
+                target_w = int(self.vessel_mask_iso.shape[2])
+                src_h = int(mask_xy.shape[0])
+                src_w = int(mask_xy.shape[1])
+                if src_h > 0 and src_w > 0:
+                    scale_h = float(target_h) / float(src_h)
+                    scale_w = float(target_w) / float(src_w)
+                    resized_mask = resize_dask(mask_xy[None, :, :], [1.0, scale_h, scale_w])[0]
+                    resized_mask = np.asarray(resized_mask > 0.5, dtype=bool)
+                    if resized_mask.shape[0] < target_h:
+                        pad_h = target_h - resized_mask.shape[0]
+                        resized_mask = np.pad(resized_mask, ((0, pad_h), (0, 0)), mode="constant", constant_values=False)
+                    if resized_mask.shape[1] < target_w:
+                        pad_w = target_w - resized_mask.shape[1]
+                        resized_mask = np.pad(resized_mask, ((0, 0), (0, pad_w)), mode="constant", constant_values=False)
+                    resized_mask = resized_mask[:target_h, :target_w]
+
+                    self.vessel_mask_iso[:, resized_mask] = 0
 
         final_z_um = 2.0
         zs = sorted(int(z) for z in self.initial_z_range.keys())

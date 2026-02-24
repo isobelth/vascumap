@@ -217,6 +217,9 @@ class DeviceSegmentationApp:
         self._cropped_stack_z_raw = None
         self.cropped_xyz = None
         self.image_name = None
+        self._mask_central_region_enabled = False
+        self._last_organoid_region = None
+        self._cropped_organoid_mask_xy_raw = None
 
 
         self.images_output = TextEdit(value="")
@@ -1080,6 +1083,9 @@ class DeviceSegmentationApp:
         self._cropped_stack_xy_raw = None
         self._cropped_stack_z_raw = None
         self.cropped_xyz = None
+        self._cropped_organoid_mask_xy_raw = None
+        self._mask_central_region_enabled = bool(mask_central_region)
+        self._last_organoid_region = organoid_region.astype(bool) if organoid_region is not None else None
         self.device_width_ok.device_width_um.enabled = True
         self.device_width_ok.device_width_um.value = 30.0
 
@@ -1096,10 +1102,11 @@ class DeviceSegmentationApp:
             device_layer = self._add_layer_if_nonzero(debug.get("device_mask").astype(np.uint8), name="device_mask", layer_type="labels")
             if device_layer is not None:
                 device_layer.opacity = 0.4
-            if organoid_region is not None:
-                organoid_layer = self._add_layer_if_nonzero(organoid_region.astype(np.uint8), name="organoid_region", layer_type="labels")
-                if organoid_layer is not None:
-                    organoid_layer.opacity = 0.4
+
+        if mask_central_region and organoid_region is not None:
+            organoid_layer = self._add_layer_if_nonzero(organoid_region.astype(np.uint8), name="organoid_region", layer_type="labels")
+            if organoid_layer is not None:
+                organoid_layer.opacity = 0.4
 
         force_roi = clear_layers or self._roi_layer is None or len(getattr(self._roi_layer, "data", [])) == 0
         self._set_roi_layer(final_corners, force=force_roi)
@@ -1313,6 +1320,7 @@ class DeviceSegmentationApp:
             self._cropped_stack_xy_raw = cropped_stack
             self._cropped_stack_z_raw = None
             self.cropped_xyz = None
+            self._cropped_organoid_mask_xy_raw = None
 
 
             cropped_view = self._scale_to_uint8_view(cropped_stack)
@@ -1334,6 +1342,27 @@ class DeviceSegmentationApp:
 
             self._cropped_stack_z_raw = self._cropped_stack_xy_raw
             self.cropped_xyz = self._cropped_stack_z_raw
+
+            if self._mask_central_region_enabled and self._last_organoid_region is not None:
+                organoid_mask = np.asarray(self._last_organoid_region, dtype=bool)
+                target_h, target_w = int(stack_for_crop.shape[1]), int(stack_for_crop.shape[2])
+                if scale > 1:
+                    organoid_mask = np.repeat(np.repeat(organoid_mask.astype(np.uint8), scale, axis=0), scale, axis=1).astype(bool)
+
+                if organoid_mask.shape[0] < target_h:
+                    pad_h = target_h - organoid_mask.shape[0]
+                    organoid_mask = np.pad(organoid_mask, ((0, pad_h), (0, 0)), mode="constant", constant_values=False)
+                if organoid_mask.shape[1] < target_w:
+                    pad_w = target_w - organoid_mask.shape[1]
+                    organoid_mask = np.pad(organoid_mask, ((0, 0), (0, pad_w)), mode="constant", constant_values=False)
+                organoid_mask = organoid_mask[:target_h, :target_w]
+
+                cropped_organoid = self._crop_rectified_from_corners(
+                    organoid_mask.astype(np.float32),
+                    corners_xy * float(scale),
+                )
+                if cropped_organoid is not None:
+                    self._cropped_organoid_mask_xy_raw = np.asarray(cropped_organoid > 0.5, dtype=bool)
 
             if counts is not None and len(counts) > 0:
                 self._last_geometry_vote_counts = np.asarray(counts, dtype=int)
@@ -1372,7 +1401,15 @@ class DeviceSegmentationApp:
             "xy_um": xy_um,
         }
 
-        return self.cropped_xyz, self._active_device_width_um, pixel_size_um, z_votes, self.image_name
+        return (
+            self.cropped_xyz,
+            self._active_device_width_um,
+            pixel_size_um,
+            z_votes,
+            self.image_name,
+            bool(self._mask_central_region_enabled),
+            self._cropped_organoid_mask_xy_raw,
+        )
 
     # -------- viewer helpers --------
     def _add_layer_if_nonzero(self, data, name, layer_type="image", **kwargs):
