@@ -14,6 +14,8 @@ from cupyx.scipy import ndimage
 import math
 import tqdm
 import cupy as cp
+from skimage.filters import apply_hysteresis_threshold
+
 
 class Generator(nn.Module):
     """
@@ -541,7 +543,6 @@ def process_vessel_mask(vessel_proba, ortho=False):
     Returns:
         np.ndarray: Binary vessel mask.
     """
-    from skimage.filters import apply_hysteresis_threshold
     if ortho:
         vessel_filtered = median_filter_3d_gpu(vessel_proba, size=7, chunk_size=(32, 1024, 1024))
         vessel_out = apply_hysteresis_threshold(vessel_filtered, 0.2, 0.5)

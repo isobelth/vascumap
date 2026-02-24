@@ -194,6 +194,38 @@ class VascuMap:
         if not cropped_stack:
             cropped_stack = self.cropped_stack
 
+        if self.mask_central_region_enabled and self.cropped_organoid_mask_xy is not None:
+            mask_xy = np.asarray(self.cropped_organoid_mask_xy, dtype=np.float32)
+            if mask_xy.ndim == 2 and mask_xy.size > 0:
+                target_h = int(cropped_stack.shape[1])
+                target_w = int(cropped_stack.shape[2])
+                src_h = int(mask_xy.shape[0])
+                src_w = int(mask_xy.shape[1])
+                if src_h > 0 and src_w > 0:
+                    scale_h = float(target_h) / float(src_h)
+                    scale_w = float(target_w) / float(src_w)
+                    resized_mask = resize_dask(mask_xy[None, :, :], [1.0, scale_h, scale_w])[0]
+                    resized_mask = np.asarray(resized_mask > 0.5, dtype=bool)
+
+                    if resized_mask.shape[0] < target_h:
+                        pad_h = target_h - resized_mask.shape[0]
+                        resized_mask = np.pad(resized_mask, ((0, pad_h), (0, 0)), mode="constant", constant_values=False)
+                    if resized_mask.shape[1] < target_w:
+                        pad_w = target_w - resized_mask.shape[1]
+                        resized_mask = np.pad(resized_mask, ((0, 0), (0, pad_w)), mode="constant", constant_values=False)
+                    resized_mask = resized_mask[:target_h, :target_w]
+
+                    if np.any(resized_mask):
+                        fill_source = np.asarray(cropped_stack)
+                        valid_region = ~resized_mask
+                        for zi in range(fill_source.shape[0]):
+                            slice_data = fill_source[zi]
+                            if np.any(valid_region):
+                                fill_value = float(np.mean(slice_data[valid_region]))
+                            else:
+                                fill_value = float(np.mean(slice_data))
+                            slice_data[resized_mask] = fill_value
+
         stack_bf = scale(cropped_stack)
         vessel_pred = self.model_p2p.predict(stack_bf, device, n_iter=1)
         self.vessel_pred_iso = resize_dask(vessel_pred, [2.5, 1, 1])
@@ -208,28 +240,6 @@ class VascuMap:
         """
         if self.initial_z_range is None or self._pre_z_start_global is None or self._pre_z_um is None:
             return
-
-        if self.mask_central_region_enabled and self.cropped_organoid_mask_xy is not None:
-            mask_xy = np.asarray(self.cropped_organoid_mask_xy, dtype=np.float32)
-            if mask_xy.ndim == 2 and mask_xy.size > 0:
-                target_h = int(self.vessel_mask_iso.shape[1])
-                target_w = int(self.vessel_mask_iso.shape[2])
-                src_h = int(mask_xy.shape[0])
-                src_w = int(mask_xy.shape[1])
-                if src_h > 0 and src_w > 0:
-                    scale_h = float(target_h) / float(src_h)
-                    scale_w = float(target_w) / float(src_w)
-                    resized_mask = resize_dask(mask_xy[None, :, :], [1.0, scale_h, scale_w])[0]
-                    resized_mask = np.asarray(resized_mask > 0.5, dtype=bool)
-                    if resized_mask.shape[0] < target_h:
-                        pad_h = target_h - resized_mask.shape[0]
-                        resized_mask = np.pad(resized_mask, ((0, pad_h), (0, 0)), mode="constant", constant_values=False)
-                    if resized_mask.shape[1] < target_w:
-                        pad_w = target_w - resized_mask.shape[1]
-                        resized_mask = np.pad(resized_mask, ((0, 0), (0, pad_w)), mode="constant", constant_values=False)
-                    resized_mask = resized_mask[:target_h, :target_w]
-
-                    self.vessel_mask_iso[:, resized_mask] = 0
 
         final_z_um = 2.0
         zs = sorted(int(z) for z in self.initial_z_range.keys())
