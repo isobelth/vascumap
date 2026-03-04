@@ -25,6 +25,7 @@ class VascuMap:
         image_source_path: str | None = None,
         image_index: int = 0,
         device_width_um: float = 35.0,
+        mask_central_region: bool = False,
     ) -> None:
         """Initialize the VascuMap workflow container.
 
@@ -73,7 +74,12 @@ class VascuMap:
                 raise ValueError("image_source_path must exist and be a .tif/.tiff/.lif file.")
 
             self.app = DeviceSegmentationApp(enable_gui=False)
-            outputs = self.app.run_automatic(image_source=src, image_index=int(image_index), device_width_um=float(device_width_um))
+            outputs = self.app.run_automatic(
+                image_source=src,
+                image_index=int(image_index),
+                device_width_um=float(device_width_um),
+                mask_central_region=bool(mask_central_region),
+            )
             self.cropped_stack, self.device_width_um, self.pixel_size_um, self.z_votes, self.image_name = outputs[:5]
             if len(outputs) >= 7:
                 self.mask_central_region_enabled = bool(outputs[5])
@@ -348,6 +354,9 @@ if __name__ == "__main__":
         vascumap = VascuMap(use_device_segmentation_app=True)
         vascumap.pipeline()
     else:
+        def _should_mask_from_name(p: Path) -> bool:
+            return "marina" in p.name.lower()
+
         if args.image_dir is None:
             raise ValueError("--image-dir is required when --no-gui is set.")
 
@@ -369,6 +378,8 @@ if __name__ == "__main__":
 
         for i, image_path in enumerate(image_paths, start=1):
             print(f"[{i}/{len(image_paths)}] Processing: {image_path.name}")
+            mask_central_region = _should_mask_from_name(image_path)
+            print(f"  -> mask_central_region={mask_central_region} (filename contains 'marina': {mask_central_region})")
 
             if image_path.suffix.lower() == ".lif":
                 try:
@@ -387,7 +398,9 @@ if __name__ == "__main__":
                             use_device_segmentation_app=False,
                             image_source_path=str(image_path),
                             image_index=idx,
+                            mask_central_region=mask_central_region,
                         )
+                        vascumap.image_name = f"{image_path.stem}_img{idx}_{vascumap.image_name if vascumap.image_name else 'image'}"
                         vascumap.pipeline()
                         successes += 1
                     except Exception as exc:
@@ -399,7 +412,9 @@ if __name__ == "__main__":
                     vascumap = VascuMap(
                         use_device_segmentation_app=False,
                         image_source_path=str(image_path),
+                        mask_central_region=mask_central_region,
                     )
+                    vascumap.image_name = f"{image_path.stem}_{vascumap.image_name if vascumap.image_name else 'image'}"
                     vascumap.pipeline()
                     successes += 1
                 except Exception as exc:
