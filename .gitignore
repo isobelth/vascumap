@@ -1,4 +1,7 @@
 *.lif
+**/*.png
+**/*.pdf
+**/*.tif
 
 data/
 outputs/
