@@ -291,15 +291,11 @@ class DeviceSegmentationApp:
         self._update_segment_button()
 
     def _fmt_um(self, value):
-        if value is None:
-            return "NA"
         try:
             vf = float(value)
+            return f"{vf:.4g}" if np.isfinite(vf) else "NA"
         except Exception:
             return "NA"
-        if not np.isfinite(vf):
-            return "NA"
-        return f"{vf:.4g}"
 
     def _voxel_log_text(self, z_um, y_um, x_um):
         return f"Voxel size (um): x={self._fmt_um(x_um)}, y={self._fmt_um(y_um)}, z={self._fmt_um(z_um)}"
@@ -314,12 +310,6 @@ class DeviceSegmentationApp:
         self._last_y_step_um = y_um
         self._last_x_step_um = x_um
         self._last_xy_step_um = np.nanmean([v for v in [x_um, y_um] if v is not None]) if (x_um is not None or y_um is not None) else None
-
-    def _image_name_from_choice(self, image_choice: str) -> str:
-        label = str(image_choice)
-        if ":" in label:
-            label = label.split(":", 1)[1].strip()
-        return Path(label).stem
 
     def run_automatic(
         self,
@@ -1022,7 +1012,10 @@ class DeviceSegmentationApp:
             self.images_output.value = "[WARN] Please select an image from the dropdown."
             return
 
-        self.image_name = self._image_name_from_choice(image_choice)
+        label = str(image_choice)
+        if ":" in label:
+            label = label.split(":", 1)[1].strip()
+        self.image_name = Path(label).stem
 
         self._last_focus_n_sampling = int(focus_n_sampling)
         self._last_focus_patch = int(focus_patch)
@@ -1321,7 +1314,6 @@ class DeviceSegmentationApp:
             self._cropped_stack_z_raw = None
             self.cropped_xyz = None
             self._cropped_organoid_mask_xy_raw = None
-
 
             cropped_view = self._scale_to_uint8_view(cropped_stack)
             if self._cropped_layer is not None and self._cropped_layer in self.viewer.layers:
