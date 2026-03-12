@@ -1,129 +1,96 @@
 # Vascular Metrics Reference
 
-This document reflects the current outputs in `bel_skeletonisation.ipynb`.
+This document reflects the current lean output set in `bel_skeletonisation.ipynb`.
 
 Outputs:
-- `global_metrics_df`: one-row sample-level summary for comparison between samples/chips
+- `global_metrics_df`: one-row summary for sample-level comparison
 - `vessel_metrics_df`: one row per cleaned vessel edge
 - `junction_metrics_df`: one row per cleaned graph node
 
-The current normalization strategy is designed for comparing vasculature grown on chips with different image sizes.
+The aim is to keep a compact set of mostly non-redundant descriptors that still captures the main biological properties of each vascular network.
 
 ## Normalization Basis
 
 - Chip volume is defined as the full volume of the `vasculature_segmentation` image.
-- The voxel size is assumed to be `2 x 2 x 2 um`.
-- Therefore, one voxel corresponds to `8 um^3`.
-- In the notebook, `chip_volume_voxels = np.prod(vasculature_segmentation.shape)`.
-- Physical chip volume can therefore be computed as:
+- The voxel size is `2 x 2 x 2 um`.
+- One voxel therefore corresponds to `8 um^3`.
+- All retained headline outputs are now reported in physical units only.
+- Chip volume is stored as `chip_volume_um3`.
+- Vessel occupancy volume is stored as `vessel_volume_um3`.
+- Length quantities are stored in `um`.
+- Cross-sectional areas are stored in `um^2`.
+- Density terms are reported in their derived physical units.
 
-	`chip_volume_um3 = chip_volume_voxels * 8`
+## 1) Detailed Tables
 
-- The current notebook stores the denominator in voxel units, so all `*_per_chip_volume` outputs are currently reported per voxel-volume of the analysed image.
-- Because every chip uses the same voxel size, those density metrics remain directly comparable between chips.
-
-## 1) Vessel Metrics (`vessel_metrics_df`)
+### Vessel Metrics (`vessel_metrics_df`)
 
 Each row corresponds to one cleaned graph edge.
 
-| Parameter | Mathematical significance | Biological significance |
-|---|---|---|
-| `z`, `y`, `x` | Arrays of voxel coordinates along the edge polyline. | 3D vessel centerline trajectory. |
-| `volume` | Sum of local cross-sectional area estimates sampled along the edge. | Relative vessel segment volume proxy. |
-| `length` | Polyline arclength measured from centerline voxels. | Vessel segment extent. |
-| `shortest_path` | Straight-line Euclidean distance between edge endpoints. | End-to-end displacement of the segment. |
-| `tortuosity` | `length / shortest_path`, clipped to `[0, 5]`. | Curviness or winding of the segment. Near 1 is straighter. |
-| `is_sprout` | `True` if either endpoint node has degree 1. | Distinguishes terminal sprouts from internal branches. |
-| `mean_cs_area` | Mean cross-sectional area estimate sampled along edge. | Average vessel caliber along segment. |
-| `median_cs_area` | Median cross-sectional area estimate sampled along edge. | Typical vessel caliber along segment. |
-| `std_cs_area` | Standard deviation of cross-sectional area estimate along edge. | Caliber heterogeneity along segment. |
-| `node1_degree`, `node2_degree` | Degree of each endpoint node in graph. | Local connectivity at the segment ends. |
-| `orientation_z`, `orientation_y`, `orientation_x` | Normalized direction vector from first to last edge point. | Gross vessel orientation in 3D. |
+Key per-edge fields retained in the detailed table:
+- `length`: segment extent in `um`
+- `tortuosity`: segment winding
+- `median_cs_area`: typical local caliber in `um^2`
+- `volume`: segment volume proxy in `um^3`
+- `is_sprout`: terminal sprout versus internal branch
 
-## 2) Junction Metrics (`junction_metrics_df`)
+### Junction Metrics (`junction_metrics_df`)
 
-Each row corresponds to one node in the cleaned graph.
+Each row corresponds to one cleaned graph node.
 
-| Parameter | Mathematical significance | Biological significance |
-|---|---|---|
-| `z`, `y`, `x` | Node voxel coordinates. | Spatial location of sprout tip or branch junction. |
-| `number_of_vessel_per_node` | Graph node degree. | Local branching connectivity. |
-| `node_type` | `sprout` for degree-1 endpoint, otherwise `junction`. | Terminal tip versus branching locus. |
-| `dist_nearest_junction` | Euclidean distance in voxel coordinates to nearest junction node. | Local spacing to nearest branchpoint. |
-| `dist_nearest_endpoint` | Euclidean distance in voxel coordinates to nearest sprout node. | Local spacing to nearest endpoint. |
-| `num_junction_neighbors` | Number of junction nodes within the specified distance threshold. | Local branchpoint crowding. |
-| `num_endpoint_neighbors` | Number of endpoint nodes within the specified distance threshold. | Local sprout crowding. |
+Key per-node fields retained in the detailed table:
+- `number_of_vessel_per_node`: local connectivity
+- `dist_nearest_junction`: local branchpoint spacing in `um`
+- `dist_nearest_endpoint`: local endpoint spacing in `um`
+- `num_junction_neighbors`: local junction crowding
+- `num_endpoint_neighbors`: local sprout crowding
 
-## 3) Global Metrics (`global_metrics_df`)
+## 2) Lean Global Metric Set (`global_metrics_df`)
 
-### 3.1 Raw sample-level totals
+These are the current headline outputs used to define and compare vasculatures.
 
-| Parameter | Mathematical significance | Biological significance |
-|---|---|---|
-| `chip_volume_voxels` | `np.prod(vasculature_segmentation.shape)`. | Total analysed chip image volume. |
-| `vessel_volume_voxels` | Number of nonzero voxels in `binary_filled_holes`. | Total vessel occupancy in the analysed image. |
-| `vessel_volume_fraction` | `vessel_volume_voxels / chip_volume_voxels`. | Fraction of analysed chip volume occupied by vasculature. |
-| `total_vessel_length` | Sum of all cleaned edge lengths. | Overall network extent. |
-| `total_number_of_sprouts` | Count of sprout edges. | Total number of terminal vessel segments. |
-| `total_number_of_branches` | Count of non-sprout edges. | Total number of internal branch segments. |
-| `total_number_of_junctions` | Count of non-endpoint nodes. | Overall branching complexity. |
-| `fractal_dimension` | Box-counting scaling exponent. | Space-filling complexity of vascular architecture. |
-| `lacunarity` | Box-mass heterogeneity statistic. | Spatial heterogeneity or gappiness of the vascular pattern. |
+| Parameter | Why it is kept |
+|---|---|
+| `chip_volume_um3` | Records the analysed image volume in physical units. |
+| `vessel_volume_um3` | Records total occupied vessel volume in physical units. |
+| `vessel_volume_fraction` | Measures vascular occupancy normalized by chip volume. |
+| `total_vessel_length_um` | Captures the overall network extent in `um`. |
+| `vessel_length_per_chip_volume_um_inverse2` | Measures vessel length density in `um / um^3 = um^-2`. |
+| `sprouts_per_vessel_length_um_inverse` | Captures terminal sprouting normalized by network length in `um^-1`. |
+| `junctions_per_vessel_length_um_inverse` | Captures branching density normalized by network extent in `um^-1`. |
+| `median_sprout_and_branch_tortuosity` | Represents the typical winding of vessel segments. |
+| `median_sprout_and_branch_median_cs_area_um2` | Represents the typical vessel caliber in `um^2`. |
+| `median_junction_dist_nearest_junction_um` | Represents the typical spacing between branchpoints in `um`. |
+| `median_sprout_dist_nearest_endpoint_um` | Represents the typical spacing in sprout-dense terminal regions in `um`. |
+| `fractal_dimension` | Describes space-filling architectural complexity. |
+| `lacunarity` | Describes heterogeneity and gappiness of the vascular pattern. |
 
-### 3.2 Size-normalized comparison metrics
+## 3) Interpretation Guide
 
-These are the most useful outputs for comparing chips with different analysed image sizes.
+- `vessel_volume_fraction` answers: how much of the chip volume is occupied by vessels?
+- `vessel_length_per_chip_volume_um_inverse2` answers: how densely packed is the network per unit chip volume?
+- `sprouts_per_vessel_length_um_inverse` answers: how terminal or exploratory is the network per unit vessel length?
+- `junctions_per_vessel_length_um_inverse` answers: how strongly branched is the network per unit vessel length?
+- `median_sprout_and_branch_tortuosity` answers: how straight or winding are typical vessels?
+- `median_sprout_and_branch_median_cs_area_um2` answers: how thick are typical vessels?
+- `median_junction_dist_nearest_junction_um` answers: how tightly spaced are branchpoints?
+- `median_sprout_dist_nearest_endpoint_um` answers: how tightly spaced are terminal endpoints?
+- `fractal_dimension` answers: how space-filling is the network architecture?
+- `lacunarity` answers: how uneven or patchy is the vascular distribution?
 
-| Parameter | Mathematical significance | Biological significance |
-|---|---|---|
-| `vessel_length_per_chip_volume` | `total_vessel_length / chip_volume_voxels`. | Network length density within the analysed chip volume. |
-| `sprouts_per_chip_volume` | `total_number_of_sprouts / chip_volume_voxels`. | Sprout density per analysed chip volume. |
-| `branches_per_chip_volume` | `total_number_of_branches / chip_volume_voxels`. | Branch density per analysed chip volume. |
-| `junctions_per_chip_volume` | `total_number_of_junctions / chip_volume_voxels`. | Junction density per analysed chip volume. |
-| `sprouts_per_vessel_length` | `total_number_of_sprouts / total_vessel_length`. | Frequency of terminal sprouts per unit network extent. |
-| `branches_per_vessel_length` | `total_number_of_branches / total_vessel_length`. | Frequency of branch segments per unit network extent. |
-| `junctions_per_vessel_length` | `total_number_of_junctions / total_vessel_length`. | Frequency of junctions per unit network extent. |
+## 4) Why This Set Is Leaner
 
-Interpretation:
-- Use `*_per_chip_volume` when you want density relative to the full analysed chip image.
-- Use `*_per_vessel_length` when you want topology normalized by how much vasculature is present.
-- Use `vessel_volume_fraction` when you want occupancy normalized by chip size.
+- Raw counts such as total sprouts, total branches, and total junctions were removed from the headline output because they are strongly size-dependent and overlap conceptually with the normalized density terms.
+- Large grouped summary blocks were removed because many of them described nearly the same biological property from slightly different angles.
+- The retained set keeps one main descriptor each for occupancy, density, branching, sprouting, caliber, tortuosity, spacing, and architecture.
 
-### 3.3 Grouped summary fields
+## 5) Units and Comparison Notes
 
-The notebook also appends grouped summary statistics from `vessel_metrics_df` and `junction_metrics_df`.
+- The segmentation voxel size is `2 x 2 x 2 um`.
+- `chip_volume_um3` and `vessel_volume_um3` are reported directly in physical volume units.
+- `total_vessel_length_um` and the nearest-distance metrics are reported directly in `um`.
+- `median_sprout_and_branch_median_cs_area_um2` is reported in `um^2`.
+- `vessel_length_per_chip_volume_um_inverse2` has units of `um^-2`.
+- `sprouts_per_vessel_length_um_inverse` and `junctions_per_vessel_length_um_inverse` have units of `um^-1`.
 
-For vessel-edge metrics, fields are generated in the form:
-- `mean_sprout_and_branch_<metric>`
-- `std_sprout_and_branch_<metric>`
-- `median_sprout_and_branch_<metric>`
-- `mean_branch_<metric>`, `std_branch_<metric>`, `median_branch_<metric>`
-- `mean_sprout_<metric>`, `std_sprout_<metric>`, `median_sprout_<metric>`
-
-For node-level metrics, fields are generated in the form:
-- `mean_junction_and_sprout_<metric>`
-- `std_junction_and_sprout_<metric>`
-- `median_junction_and_sprout_<metric>`
-- `mean_junction_<metric>`, `std_junction_<metric>`, `median_junction_<metric>`
-- `mean_sprout_<metric>`, `std_sprout_<metric>`, `median_sprout_<metric>`
-
-These grouped fields are still useful, but for cross-chip comparison the most robust first-pass readouts are usually:
-- `vessel_volume_fraction`
-- `vessel_length_per_chip_volume`
-- `sprouts_per_chip_volume`
-- `branches_per_chip_volume`
-- `junctions_per_chip_volume`
-- `sprouts_per_vessel_length`
-- `branches_per_vessel_length`
-- `junctions_per_vessel_length`
-
-## 4) Units and Comparison Notes
-
-- The segmentation image voxel size is `2 x 2 x 2 um`.
-- One voxel corresponds to `8 um^3`.
-- `chip_volume_voxels` and `vessel_volume_voxels` are stored in voxel counts.
-- To convert either to physical volume, multiply by `8`.
-- Length-based quantities are currently computed from voxel coordinates in the notebook, so they are reported in voxel-length units unless the code is further scaled by voxel size.
-- This means the current volume-normalized metrics are correct for comparison between chips acquired at the same voxel size, but not yet expressed in absolute physical units.
-
-If absolute physical units are required everywhere, the next step would be to scale all length-based outputs by voxel size and all volume-normalized outputs by `8 um^3` per voxel.
+This means the retained comparison metrics are now fully physical-unit outputs rather than voxel-unit proxies.
