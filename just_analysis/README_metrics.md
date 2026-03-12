@@ -1,96 +1,53 @@
 # Vascular Metrics Reference
 
-This document reflects the current lean output set in `bel_skeletonisation.ipynb`.
+This document reflects the current compact output set in `bel_skeletonisation.ipynb`.
 
-Outputs:
-- `global_metrics_df`: one-row summary for sample-level comparison
+Primary outputs:
+- `global_metrics_df`: one-row sample-level comparison table
 - `vessel_metrics_df`: one row per cleaned vessel edge
 - `junction_metrics_df`: one row per cleaned graph node
 
-The aim is to keep a compact set of mostly non-redundant descriptors that still captures the main biological properties of each vascular network.
+The goal is one metric per biological concept, with shape-invariant normalization emphasized.
 
 ## Normalization Basis
 
-- Chip volume is defined as the full volume of the `vasculature_segmentation` image.
-- The voxel size is `2 x 2 x 2 um`.
-- One voxel therefore corresponds to `8 um^3`.
-- All retained headline outputs are now reported in physical units only.
-- Chip volume is stored as `chip_volume_um3`.
-- Vessel occupancy volume is stored as `vessel_volume_um3`.
-- Length quantities are stored in `um`.
-- Cross-sectional areas are stored in `um^2`.
-- Density terms are reported in their derived physical units.
+- Voxel size: `2 x 2 x 2 um` (`8 um^3` per voxel).
+- Chip volume: `chip_volume_um3 = np.prod(shape) * voxel_volume_um3`.
+- Vessel volume: `vessel_volume_um3 = occupied_voxels * voxel_volume_um3`.
+- Characteristic length: `chip_characteristic_length_um = chip_volume_um3^(1/3)`.
+- Characteristic area: `chip_characteristic_area_um2 = chip_characteristic_length_um^2`.
 
-## 1) Detailed Tables
+## Compact Headline Metrics (`global_metrics_df`)
 
-### Vessel Metrics (`vessel_metrics_df`)
-
-Each row corresponds to one cleaned graph edge.
-
-Key per-edge fields retained in the detailed table:
-- `length`: segment extent in `um`
-- `tortuosity`: segment winding
-- `median_cs_area`: typical local caliber in `um^2`
-- `volume`: segment volume proxy in `um^3`
-- `is_sprout`: terminal sprout versus internal branch
-
-### Junction Metrics (`junction_metrics_df`)
-
-Each row corresponds to one cleaned graph node.
-
-Key per-node fields retained in the detailed table:
-- `number_of_vessel_per_node`: local connectivity
-- `dist_nearest_junction`: local branchpoint spacing in `um`
-- `dist_nearest_endpoint`: local endpoint spacing in `um`
-- `num_junction_neighbors`: local junction crowding
-- `num_endpoint_neighbors`: local sprout crowding
-
-## 2) Lean Global Metric Set (`global_metrics_df`)
-
-These are the current headline outputs used to define and compare vasculatures.
-
-| Parameter | Why it is kept |
+| Metric | Interpretation |
 |---|---|
-| `chip_volume_um3` | Records the analysed image volume in physical units. |
-| `vessel_volume_um3` | Records total occupied vessel volume in physical units. |
-| `vessel_volume_fraction` | Measures vascular occupancy normalized by chip volume. |
-| `total_vessel_length_um` | Captures the overall network extent in `um`. |
-| `vessel_length_per_chip_volume_um_inverse2` | Measures vessel length density in `um / um^3 = um^-2`. |
-| `sprouts_per_vessel_length_um_inverse` | Captures terminal sprouting normalized by network length in `um^-1`. |
-| `junctions_per_vessel_length_um_inverse` | Captures branching density normalized by network extent in `um^-1`. |
-| `median_sprout_and_branch_tortuosity` | Represents the typical winding of vessel segments. |
-| `median_sprout_and_branch_median_cs_area_um2` | Represents the typical vessel caliber in `um^2`. |
-| `median_junction_dist_nearest_junction_um` | Represents the typical spacing between branchpoints in `um`. |
-| `median_sprout_dist_nearest_endpoint_um` | Represents the typical spacing in sprout-dense terminal regions in `um`. |
-| `fractal_dimension` | Describes space-filling architectural complexity. |
-| `lacunarity` | Describes heterogeneity and gappiness of the vascular pattern. |
+| `vessel_volume_fraction` | Vessel occupancy, normalized to chip volume. |
+| `vessel_length_per_chip_volume_um_inverse2` | Vessel length density per chip volume. |
+| `sprouts_per_chip_volume_um_inverse3` | Sprout endpoint density per chip volume. |
+| `junctions_per_chip_volume_um_inverse3` | Junction density per chip volume. |
+| `median_sprout_and_branch_tortuosity` | Typical segment winding (shape descriptor). |
+| `median_cs_area_over_characteristic_area` | Typical vessel caliber, normalized for chip size. |
+| `median_junction_dist_nearest_junction_per_characteristic_length` | Typical branchpoint spacing, size-normalized. |
+| `median_sprout_dist_nearest_endpoint_per_characteristic_length` | Typical endpoint spacing, size-normalized. |
+| `fractal_dimension` | Space-filling network complexity. |
+| `lacunarity` | Pattern heterogeneity / gappiness. |
+| `internal_pore_area_fraction_in_filled_vascular_area` | Porosity fraction within filled vascular area. |
+| `total_internal_pore_density_per_vessel_volume_um_inverse3` | Internal pore count density per vessel volume. |
+| `median_internal_pore_area_um2` | Typical enclosed pore area. |
+| `p90_internal_pore_area_um2` | Upper-tail enclosed pore area. |
+| `median_internal_pore_max_inscribed_radius_um` | Typical enclosed pore radius scale. |
 
-## 3) Interpretation Guide
+## Do you need mean, std, and median for all metrics?
 
-- `vessel_volume_fraction` answers: how much of the chip volume is occupied by vessels?
-- `vessel_length_per_chip_volume_um_inverse2` answers: how densely packed is the network per unit chip volume?
-- `sprouts_per_vessel_length_um_inverse` answers: how terminal or exploratory is the network per unit vessel length?
-- `junctions_per_vessel_length_um_inverse` answers: how strongly branched is the network per unit vessel length?
-- `median_sprout_and_branch_tortuosity` answers: how straight or winding are typical vessels?
-- `median_sprout_and_branch_median_cs_area_um2` answers: how thick are typical vessels?
-- `median_junction_dist_nearest_junction_um` answers: how tightly spaced are branchpoints?
-- `median_sprout_dist_nearest_endpoint_um` answers: how tightly spaced are terminal endpoints?
-- `fractal_dimension` answers: how space-filling is the network architecture?
-- `lacunarity` answers: how uneven or patchy is the vascular distribution?
+No. For most vasculature metrics, that is redundant and inflates output width.
 
-## 4) Why This Set Is Leaner
+Recommended default for headline reporting:
+- Keep **median only** for continuous biological descriptors (robust to outliers).
+- Keep **one upper-tail metric** (for pores, `p90`) when tail behavior is biologically relevant.
+- Use mean/std only for a specific downstream statistical reason (not by default in the summary table).
 
-- Raw counts such as total sprouts, total branches, and total junctions were removed from the headline output because they are strongly size-dependent and overlap conceptually with the normalized density terms.
-- Large grouped summary blocks were removed because many of them described nearly the same biological property from slightly different angles.
-- The retained set keeps one main descriptor each for occupancy, density, branching, sprouting, caliber, tortuosity, spacing, and architecture.
+In this notebook, grouped summary output has been slimmed to median-only (`add_grouped_stats`).
 
-## 5) Units and Comparison Notes
+## Detailed Tables (for drill-down)
 
-- The segmentation voxel size is `2 x 2 x 2 um`.
-- `chip_volume_um3` and `vessel_volume_um3` are reported directly in physical volume units.
-- `total_vessel_length_um` and the nearest-distance metrics are reported directly in `um`.
-- `median_sprout_and_branch_median_cs_area_um2` is reported in `um^2`.
-- `vessel_length_per_chip_volume_um_inverse2` has units of `um^-2`.
-- `sprouts_per_vessel_length_um_inverse` and `junctions_per_vessel_length_um_inverse` have units of `um^-1`.
-
-This means the retained comparison metrics are now fully physical-unit outputs rather than voxel-unit proxies.
+`vessel_metrics_df` and `junction_metrics_df` still contain richer per-edge and per-node measurements for diagnostics and custom analysis. The compact `global_metrics_df` is intended for cross-chip comparison and model-ready downstream use.
