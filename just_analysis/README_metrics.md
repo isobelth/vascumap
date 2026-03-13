@@ -3,9 +3,7 @@
 This file documents the streamlined outputs in `bel_skeletonisation.ipynb` intended for cross-chip comparison and pipeline integration.
 
 Primary tables:
-- `global_metrics_df`: compact sample-level output (recommended for downstream analysis)
-- `vessel_metrics_df`: per-edge measurements (for QC and drill-down)
-- `junction_metrics_df`: per-node measurements (for QC and drill-down)
+- `global_metrics_df`: compact sample-level output (single authoritative output)
 
 The design principle is one biologically meaningful metric per concept, with shape normalization built in.
 
@@ -136,7 +134,7 @@ Count/density/fraction metrics (for example volume fraction or junction density)
 
 ## Junction Distance Mode: Euclidean vs Along-Skeleton
 
-`compute_junction_metrics` supports two definitions for nearest-neighbor spacing:
+The compact summary computation supports two definitions for nearest-neighbor spacing:
 
 - **Euclidean (`distance_mode='euclidean'`)**  
 	Straight-line distance between node coordinates in physical space.
@@ -174,10 +172,9 @@ For this compact pipeline output, SD is excluded by default because:
 - it is more sensitive to segmentation outliers,
 - and median + $P90-P10$ captures most biologically relevant spread in a robust way.
 
-If needed, SD can still be computed from `vessel_metrics_df` / `junction_metrics_df` in a downstream analysis notebook.
+If needed, SD can be added directly from the same internal edge/node distributions used in the summary step.
 
 ## Practical Notes
 
 - Use `global_metrics_df` for inter-sample statistics and modeling.
-- Use `vessel_metrics_df` / `junction_metrics_df` for diagnostics and mechanism exploration.
 - Keep one distance mode (Euclidean vs skeleton geodesic) consistent across all compared samples.
