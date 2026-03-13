@@ -1,7 +1,5 @@
 # Vascular Metrics Reference (`global_metrics_df`)
 
-This document is a one-to-one reference for **all columns currently emitted** by `bel_skeletonisation.ipynb` in the single-row output dataframe `global_metrics_df`.
-
 ## Scope and Definitions
 
 All values are sample-level metrics derived from the final cleaned segmentation/skeleton/graph.
@@ -65,6 +63,20 @@ Use one mode consistently across a study.
 | `p90_minus_p10_cs_area_over_characteristic_area` | unitless | `p90_minus_p10_sprout_and_branch_median_cs_area_um2 / A_c` | Size-invariant heterogeneity of vessel caliber. |
 | `total_internal_pore_density_per_vessel_volume_um_inverse3` | $\mu m^{-3}$ | `total_internal_pore_count / V_{vessel}` | Pore-event burden relative to vascular biomass. |
 
+## Mathematical Explanations/Caveats
+- **Fractal Dimension:** lies in the range 1 -> 2 (1 is a pure line, 2 is a filled 2d shape). Higher fractal dimension means each branch has more subbranches.
+	- *Note!:* Fractal dimension is calculated on the **skeleton** not the segmented vasculature, so it measures only branching and not vessel extent
+
+
+- **Lacunarity:** always >1. Low lacunarity means more even vasculature with consistent vessel width. High lacunarity indicates a patch network with strong clustering.
+	- *Isn't that measuring the same thing as the spread in vessel/hole cross sectional area?* Not quite. You can have identical caliber/hole-size spreads with very different spatial clustering → different lacunarity. Similarly, You can have different caliber spreads but similar large-scale occupancy pattern → similar lacunarity.
+
+
+
+
+
+
+
 ## Pore Inclusion/Exclusion Rules
 
 Pores are detected slice-wise as internal holes in `binary_fill_holes(vessel_slice) & ~vessel_slice`.
@@ -77,15 +89,3 @@ This suppresses tiny noise and very large likely-artifactual cavities.
 
 ## Missing-Value Behavior (NaN)
 
-Some columns are `NaN` when the required structure is absent, for example:
-- no valid edges/nodes for tortuosity and nearest-distance distributions,
-- no valid pores for pore-size/radius distribution summaries,
-- divisions where denominator is effectively zero.
-
-This is expected behavior and indicates the metric is undefined for that sample, not a computation crash.
-
-## Recommended Use
-
-- Use `global_metrics_df` as the authoritative per-sample feature row.
-- For cross-chip comparisons, prefer the shape-invariant normalized columns when chip volumes differ.
-- Keep distance mode (`skeleton` or `euclidean`) fixed for all samples in one analysis.
