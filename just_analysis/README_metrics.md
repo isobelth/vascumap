@@ -35,8 +35,8 @@ Use one mode consistently across a study.
 | `vessel_length_per_chip_volume_um_inverse2` | $\mu m^{-2}$ | $L_{total}/V_{chip}$ | 3D vessel packing density (length density). |
 | `sprouts_per_vessel_length_um_inverse` | $\mu m^{-1}$ | $N_{sprout}/L_{total}$ | Sprouting intensity relative to network size. |
 | `junctions_per_vessel_length_um_inverse` | $\mu m^{-1}$ | $N_{junction}/L_{total}$ | Branching intensity per unit vessel length. |
-| `fractal_dimension` | unitless | Box-counting slope of segmented vascular mask | Space-filling geometric complexity of vasculature. |
-| `lacunarity` | unitless | Gap/heterogeneity statistic from box-mass distribution | Patchiness/inhomogeneity of vessel occupancy. |
+| `skeleton_fractal_dimension` | unitless | Box-counting slope of the cleaned graph-derived skeleton mask | Geometric/topological complexity of vessel branching architecture (largely independent of caliber). |
+| `skeleton_lacunarity` | unitless | Gap/heterogeneity statistic from box-mass distribution on the cleaned graph-derived skeleton mask | Patchiness/uneven spatial clustering of the vascular centerline network. |
 | `median_sprout_and_branch_tortuosity` | unitless | Median of per-edge $\tau = L_{path}/L_{endpoints}$ (clipped to [0,5]) | Typical vessel winding vs straightness. |
 | `p90_minus_p10_sprout_and_branch_tortuosity` | unitless | $P90(\tau)-P10(\tau)$ | Heterogeneity of vessel tortuosity. |
 | `median_sprout_and_branch_median_cs_area_um2` | $\mu m^2$ | Median of per-edge median sampled cross-sectional area values | Typical vessel caliber (thickness proxy). |
@@ -64,12 +64,12 @@ Use one mode consistently across a study.
 | `total_internal_pore_density_per_vessel_volume_um_inverse3` | $\mu m^{-3}$ | `total_internal_pore_count / V_{vessel}` | Pore-event burden relative to vascular biomass. |
 
 ## Mathematical Explanations/Caveats
-- **Fractal Dimension:** lies in the range 1 -> 2 (1 is a pure line, 2 is a filled 2d shape). Higher fractal dimension means each branch has more subbranches.
-	- *Note!:* Fractal dimension is calculated on the **skeleton** not the segmented vasculature, so it measures only branching and not vessel extent
+- **Fractal Dimension:** computed from the cleaned graph-derived skeleton mask. In 2D intuition it typically spans from line-like to area-filling behavior; in this 3D workflow treat it as a scale-dependent complexity index (higher usually means more branching complexity/space filling of centerlines).
+	- *Note:* this is intentionally skeleton-based, so it emphasizes network architecture rather than vessel thickness.
 
 
-- **Lacunarity:** always >1. Low lacunarity means more even vasculature with consistent vessel width. High lacunarity indicates a patch network with strong clustering.
-	- *Isn't that measuring the same thing as the spread in vessel/hole cross sectional area?* Not quite. You can have identical caliber/hole-size spreads with very different spatial clustering → different lacunarity. Similarly, You can have different caliber spreads but similar large-scale occupancy pattern → similar lacunarity.
+- **Lacunarity:** computed on the cleaned graph-derived skeleton mask (not the full segmentation mask). Lower values indicate a more evenly distributed centerline network; higher values indicate stronger clustering/patchiness of branches across space.
+	- *Isn't that measuring the same thing as the spread in vessel/hole cross sectional area?* Not quite. Caliber and pore spread are size-distribution metrics; skeleton lacunarity is a spatial-organization metric. You can match one and change the other.
 
 
 
