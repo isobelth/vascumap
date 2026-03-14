@@ -10,10 +10,8 @@ Symbols used below:
 - $L_{total}$: total centerline length of all graph edges ($\mu m$)
 - $N_{junction}$: number of non-sprout graph nodes
 - $N_{sprout}$: number of graph edges touching at least one sprout node
-- $L_c = V_{chip}^{1/3}$: characteristic chip length ($\mu m$)
-- $A_c = L_c^2$: characteristic chip area ($\mu m^2$)
 
-Default voxel size in the notebook is `(2, 2, 2) um`.
+Default voxel size is `(2, 2, 2) µm`.
 
 ## Distance Convention (important)
 
@@ -51,29 +49,20 @@ Use one mode consistently across a study.
 | `p90_minus_p10_internal_pore_area_um2` | $\mu m^2$ | Spread $P90-P10$ of pore area | Heterogeneity of pore area. |
 | `median_internal_pore_max_inscribed_radius_um` | $\mu m$ | Median pore max-inscribed radius | Typical intrinsic pore radius scale. |
 | `p90_minus_p10_internal_pore_max_inscribed_radius_um` | $\mu m$ | Spread $P90-P10$ of max-inscribed radius | Heterogeneity of pore radius scale. |
-| `chip_characteristic_length_um` | $\mu m$ | $L_c = V_{chip}^{1/3}$ | Reference length for shape-invariant scaling. |
-| `total_vessel_length_per_chip_characteristic_length` | unitless | $L_{total}/L_c$ | Vessel extent normalized to chip linear scale. |
 | `sprouts_per_chip_volume_um_inverse3` | $\mu m^{-3}$ | $N_{sprout}/V_{chip}$ | Sprout density per chip volume. |
 | `junctions_per_chip_volume_um_inverse3` | $\mu m^{-3}$ | $N_{junction}/V_{chip}$ | Junction density per chip volume. |
-| `median_junction_dist_nearest_junction_per_characteristic_length` | unitless | `median_junction_dist_nearest_junction_um / L_c` | Size-invariant typical branchpoint spacing. |
-| `p90_minus_p10_junction_dist_nearest_junction_per_characteristic_length` | unitless | `p90_minus_p10_junction_dist_nearest_junction_um / L_c` | Size-invariant heterogeneity of branchpoint spacing. |
-| `median_sprout_dist_nearest_endpoint_per_characteristic_length` | unitless | `median_sprout_dist_nearest_endpoint_um / L_c` | Size-invariant typical endpoint spacing. |
-| `p90_minus_p10_sprout_dist_nearest_endpoint_per_characteristic_length` | unitless | `p90_minus_p10_sprout_dist_nearest_endpoint_um / L_c` | Size-invariant heterogeneity of endpoint spacing. |
-| `median_cs_area_over_characteristic_area` | unitless | `median_sprout_and_branch_median_cs_area_um2 / A_c` | Size-invariant typical vessel caliber. |
-| `p90_minus_p10_cs_area_over_characteristic_area` | unitless | `p90_minus_p10_sprout_and_branch_median_cs_area_um2 / A_c` | Size-invariant heterogeneity of vessel caliber. |
 | `total_internal_pore_density_per_vessel_volume_um_inverse3` | $\mu m^{-3}$ | `total_internal_pore_count / V_{vessel}` | Pore-event burden relative to vascular biomass. |
 
 ## Mathematical Explanations/Caveats
-- **Fractal Dimension:** computed from the cleaned graph-derived skeleton mask. In 2D intuition it typically spans from line-like to area-filling behavior; in this 3D workflow treat it as a scale-dependent complexity index (higher usually means more branching complexity/space filling of centerlines).
-	- *Note:* this is intentionally skeleton-based, so it emphasizes network architecture rather than vessel thickness.
+- **Fractal Dimension:** computed from the cleaned graph-derived skeleton mask. It spans from line-like (1d) to area-like (2d) behavior; in this 3D workflow treat it as a scale-dependent complexity index (higher usually means more branching complexity/space filling of centerlines).
+  <img src="README_images/fractal_dimension.png" width="75%" />
+	- *Note:* this is skeleton-based, so it emphasizes network architecture rather than vessel thickness.
+<img src="README_images/equivalent_fractal_dimension.png" width="75%" />
 
 
 - **Lacunarity:** computed on the cleaned graph-derived skeleton mask (not the full segmentation mask). Lower values indicate a more evenly distributed centerline network; higher values indicate stronger clustering/patchiness of branches across space.
 	- *Isn't that measuring the same thing as the spread in vessel/hole cross sectional area?* Not quite. Caliber and pore spread are size-distribution metrics; skeleton lacunarity is a spatial-organization metric. You can match one and change the other.
-
-
-
-
+<img src="README_images/lacunarity.png" width="75%" />
 
 
 
@@ -87,5 +76,4 @@ Validity filters used by the current code:
 
 This suppresses tiny noise and very large likely-artifactual cavities.
 
-## Missing-Value Behavior (NaN)
 

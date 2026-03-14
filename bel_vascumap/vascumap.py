@@ -13,6 +13,7 @@ from warnings import filterwarnings
 
 from models import Pix2Pix, load_segmentation_model, predict_mask_ortho, process_vessel_mask
 from utils import scale, resize_dask
+from skeletonisation import clean_and_analyse
 
 filterwarnings('ignore')
 
@@ -303,7 +304,7 @@ class VascuMap:
         np.save(f"{name_prefix}_cropped_stack_{run_suffix}.npy", self.cropped_stack)
         current_x_pixels = self.vessel_proba_iso.shape[1]
         current_y_pixels = self.vessel_proba_iso.shape[2]
-        pixels_to_remove = int(self.device_width_um/2)
+        pixels_to_remove = int(self.device_width_um)################updated harsher cropping here
         self.vessel_pred_iso = self.vessel_pred_iso[z_start_final:z_stop_final, pixels_to_remove:current_x_pixels-pixels_to_remove, pixels_to_remove:current_y_pixels-pixels_to_remove]
         self.vessel_proba_iso = self.vessel_proba_iso[z_start_final:z_stop_final, pixels_to_remove:current_x_pixels-pixels_to_remove, pixels_to_remove:current_y_pixels-pixels_to_remove]
         self.vessel_mask_iso = self.vessel_mask_iso[z_start_final:z_stop_final, pixels_to_remove:current_x_pixels-pixels_to_remove, pixels_to_remove:current_y_pixels-pixels_to_remove]
@@ -318,10 +319,63 @@ class VascuMap:
         
         
     def skeletonisation_and_analysis(
-        self
+        self,
+        voxel_size_um=(2.0, 2.0, 2.0),
+        junction_distance_mode='skeleton',
     ) -> None:
         """
+        Run skeletonisation and vascular-network analysis on the final mask.
         """
+        if self.vessel_mask_iso is None:
+            print("No vessel_mask_iso available – skipping analysis.")
+            return
+
+        print("Running skeletonisation and analysis...")
+        # Build exclusion mask matched to vessel_mask_iso shape if organoid masking was used
+        exclusion_mask_xy = None
+        if self.mask_central_region_enabled and self.cropped_organoid_mask_xy is not None:
+            mask_xy = np.asarray(self.cropped_organoid_mask_xy, dtype=np.float32)
+            if mask_xy.ndim == 2 and mask_xy.size > 0:
+                target_h = int(self.vessel_mask_iso.shape[1])
+                target_w = int(self.vessel_mask_iso.shape[2])
+                src_h, src_w = int(mask_xy.shape[0]), int(mask_xy.shape[1])
+                if src_h > 0 and src_w > 0:
+                    # Resize to pre-trim resolution (same XY as model output)
+                    pre_trim_h = target_h + 2 * int(self.device_width_um / 2)
+                    pre_trim_w = target_w + 2 * int(self.device_width_um / 2)
+                    scale_h = float(pre_trim_h) / float(src_h)
+                    scale_w = float(pre_trim_w) / float(src_w)
+                    resized = resize_dask(mask_xy[None, :, :], [1.0, scale_h, scale_w])[0]
+                    resized = np.asarray(resized > 0.5, dtype=bool)
+                    # Apply same device-width trim as postprocess
+                    pixels_to_remove = int(self.device_width_um / 2)
+                    resized = resized[pixels_to_remove:pixels_to_remove + target_h,
+                                      pixels_to_remove:pixels_to_remove + target_w]
+                    # Pad/clip to exact target shape
+                    if resized.shape[0] < target_h:
+                        resized = np.pad(resized, ((0, target_h - resized.shape[0]), (0, 0)),
+                                         mode="constant", constant_values=False)
+                    if resized.shape[1] < target_w:
+                        resized = np.pad(resized, ((0, 0), (0, target_w - resized.shape[1])),
+                                         mode="constant", constant_values=False)
+                    resized = resized[:target_h, :target_w]
+                    if np.any(resized):
+                        exclusion_mask_xy = resized
+                        print(f"Organoid exclusion mask applied: {int(np.count_nonzero(exclusion_mask_xy))} pixels excluded per z-slice")
+
+        self.analysis_results = clean_and_analyse(
+            self.vessel_mask_iso,
+            voxel_size_um=voxel_size_um,
+            junction_distance_mode=junction_distance_mode,
+            exclusion_mask_xy=exclusion_mask_xy,
+        )
+
+        name_prefix = self.image_name if self.image_name else "image"
+        metrics_df = self.analysis_results['global_metrics_df']
+        csv_path = f"{name_prefix}_analysis_metrics.csv"
+        metrics_df.to_csv(csv_path, index=False)
+        print(f"Analysis metrics saved to {csv_path}")
+        print(metrics_df.to_string(index=False))
         
     def pipeline(
         self,
@@ -338,6 +392,7 @@ class VascuMap:
         self.preprocess()
         self.model_inference(device="cuda")
         self.postprocess()
+        self.skeletonisation_and_analysis()
         
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run VascuMap in GUI or no-GUI mode.")

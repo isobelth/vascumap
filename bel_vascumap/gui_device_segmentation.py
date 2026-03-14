@@ -1103,7 +1103,7 @@ class DeviceSegmentationApp:
 
         force_roi = clear_layers or self._roi_layer is None or len(getattr(self._roi_layer, "data", [])) == 0
         self._set_roi_layer(final_corners, force=force_roi)
-        self._update_outer_geometry_from_current_roi(30.0, update_message=False)
+        self._update_outer_geometry_from_current_roi(self.device_width_ok.device_width_um.value, update_message=False)
         self.images_output.value = (
             "[OK] Segmentation complete. Outer geometry is shown at default Device width=30 um; adjust width as needed."
         )
