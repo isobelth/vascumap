@@ -27,6 +27,7 @@ class VascuMap:
         image_index: int = 0,
         device_width_um: float = 35.0,
         mask_central_region: bool = False,
+        channel: int = 0,
     ) -> None:
         """Initialize the VascuMap workflow container.
 
@@ -79,6 +80,7 @@ class VascuMap:
                 raise ValueError("image_source_path must exist and be a .tif/.tiff/.lif file.")
 
             self.app = DeviceSegmentationApp(enable_gui=False)
+            self.app.channel = int(channel)
             outputs = self.app.run_automatic(
                 image_source=src,
                 image_index=int(image_index),
@@ -127,6 +129,10 @@ class VascuMap:
         if not z_votes:
             z_votes = self.z_votes
         print(f"Initial z votes {self.z_votes}")
+
+        if z_votes is None or len(z_votes) == 0:
+            print("No z-vote data available – skipping preprocess.")
+            return None
 
         z_step = float(pixel_size_um["z_um"])
         if not np.isfinite(z_step) or z_step <= 0:
@@ -390,9 +396,15 @@ class VascuMap:
             )
 
         # ── Run pipeline stages ───────────────────────────────────────────
-        self.preprocess()
+        result = self.preprocess()
+        if result is None and self.cropped_stack is None:
+            print(f"  ⚠ Skipping {name_prefix}: no valid z-range / cropped stack.")
+            return
         self.model_inference(device="cuda")
         self.postprocess()
+        if self._z_start_final is None:
+            print(f"  ⚠ Skipping {name_prefix}: postprocess found no strong vote planes.")
+            return
         self.skeletonisation_and_analysis()
 
         # ── Aligned cropped stack (2 µm iso) ─────────────────────────────
