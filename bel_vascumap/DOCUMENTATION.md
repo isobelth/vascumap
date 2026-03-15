@@ -1,2409 +1,692 @@
-# VascuMap3D Technical Documentation
+# VascuMap Technical Documentation
 
-> **A Complete Guide to 3D Vascular Network Segmentation and Analysis**
+> **A Complete Reference for the bel_vascumap Pipeline**
 
 ---
 
 ## Table of Contents
 
-1. [Introduction & Background](#1-introduction--background)
-   - [1.1 What is VascuMap3D?](#11-what-is-vascumap3d)
-   - [1.2 Pipeline Overview](#12-pipeline-overview)
-   - [1.3 Key Concepts](#13-key-concepts)
-   - [1.4 System Requirements](#14-system-requirements)
-
-2. [Detailed Workflow](#2-detailed-workflow)
-   - [2.1 Training](#21-training)
-     - [2.1.1 Image Translation (3D Pix2Pix)](#211-image-translation-3d-pix2pix)
-     - [2.1.2 Segmentation (2D U-Net)](#212-segmentation-2d-u-net)
-   - [2.2 Inference Pipeline](#22-inference-pipeline)
-     - [2.2.1 Data Loading & Voxel Normalization](#221-data-loading--voxel-normalization)
-     - [2.2.2 Preprocessing & Cropping](#222-preprocessing--cropping)
-     - [2.2.3 Image Translation Inference](#223-image-translation-inference)
-     - [2.2.4 Segmentation Inference (2.5D)](#224-segmentation-inference-25d)
-   - [2.3 Graph Analysis](#23-graph-analysis)
-     - [2.3.1 Skeletonization](#231-skeletonization)
-     - [2.3.2 Graph Construction](#232-graph-construction)
-     - [2.3.3 Metrics Computation](#233-metrics-computation)
-     - [2.3.4 Output Files](#234-output-files)
-
-3. [Function Reference](#3-function-reference)
-   - [3.1 Image Translation Module](#31-image-translation-module)
-   - [3.2 Segmentation Module](#32-segmentation-module)
-   - [3.3 Pipeline Module](#33-pipeline-module)
-   - [3.4 Graph Analysis Module](#34-graph-analysis-module)
-   - [3.5 Utilities](#35-utilities)
-
-4. [Metrics Reference](#4-metrics-reference)
-   - [4.1 Global Metrics (CSV)](#41-global-metrics-csv)
-   - [4.2 Vessel Metrics (HDF5)](#42-vessel-metrics-hdf5)
-   - [4.3 Junction Metrics (HDF5)](#43-junction-metrics-hdf5)
-
-5. [Appendix](#5-appendix)
-   - [5.1 Mathematical Formulas](#51-mathematical-formulas)
-   - [5.2 Troubleshooting](#52-troubleshooting)
-   - [5.3 Contributing](#53-contributing)
+1. [Pipeline Overview](#1-pipeline-overview)
+2. [VascuMap Class](#2-vascumap-class)
+3. [Device Segmentation App](#3-device-segmentation-app)
+4. [Model Inference](#4-model-inference)
+5. [Skeletonisation and Analysis](#5-skeletonisation-and-analysis)
+6. [Utilities](#6-utilities)
+7. [Output Files and Metrics](#7-output-files-and-metrics)
+8. [System Requirements and Installation](#8-system-requirements-and-installation)
 
 ---
 
-# 1. Introduction & Background
+# 1. Pipeline Overview
 
-## 1.1 What is VascuMap3D?
+VascuMap is an end-to-end pipeline for quantifying 3D vascular networks inside microfluidic chips. It accepts brightfield microscopy stacks (`.lif`, `.tif`, `.tiff`) and produces morphometric metrics and visualisation outputs.
 
-VascuMap3D is an end-to-end computational pipeline for analyzing 3D vascular networks from microscopy images. It solves a common challenge in biological imaging: extracting quantitative morphometric data from complex, branching vessel structures.
-
-**Target users:**
-- **Biologists** studying angiogenesis, vasculogenesis, or tumor vasculature
-- **Biomedical engineers** developing tissue engineering constructs
-- **Computational scientists** building on or extending the pipeline
-
-## 1.2 Pipeline Overview
-
-The pipeline processes raw microscopy images through four main stages:
+## 1.1 Data Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           VascuMap3D Pipeline                                │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   STAGE 1: IMAGE TRANSLATION                                                 │
-│   ──────────────────────────                                                 │
-│   Input:  Brightfield Z-stack (.lif file)                                   │
-│   Output: Fluorescence-like volume                                          │
-│   Method: 3D Pix2Pix GAN                                                    │
-│                                                                              │
-│   Why? Brightfield images have low contrast. We translate them to           │
-│   fluorescence-like images where vessels are clearly visible.               │
-│                                                                              │
-│                              ↓                                               │
-│                                                                              │
-│   STAGE 2: SEGMENTATION                                                      │
-│   ─────────────────────                                                      │
-│   Input:  Fluorescence-like volume                                          │
-│   Output: Binary vessel mask                                                │
-│   Method: 2D U-Net with 2.5D inference (3-plane averaging)                  │
-│                                                                              │
-│   Why? 2D models are faster and have better pretrained weights.             │
-│   We run inference on axial, coronal, and sagittal planes, then average.    │
-│                                                                              │
-│                              ↓                                               │
-│                                                                              │
-│   STAGE 3: SKELETONIZATION                                                   │
-│   ────────────────────────                                                   │
-│   Input:  Binary vessel mask                                                │
-│   Output: 1-pixel-wide skeleton                                             │
-│   Method: Morphological thinning OR mesh contraction                        │
-│                                                                              │
-│   Why? We need to reduce vessels to centerlines to extract topology.        │
-│                                                                              │
-│                              ↓                                               │
-│                                                                              │
-│   STAGE 4: GRAPH ANALYSIS                                                    │
-│   ───────────────────────                                                    │
-│   Input:  Skeleton image                                                    │
-│   Output: NetworkX graph + CSV/HDF5 metrics                                 │
-│   Method: sknw graph extraction + custom metric computation                 │
-│                                                                              │
-│   Why? Graphs let us compute topological metrics: branching, tortuosity,    │
-│   vessel lengths, fractal dimension, etc.                                   │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+.lif / .tif / .tiff file
+  -> Stage 1: Device Segmentation (DeviceSegmentationApp)
+      - Detects device ROI
+      - Crops XY using device boundaries
+      - Computes per-plane z-vote counts
+      - Optionally masks central organoid region
+
+  -> cropped_stack (Z, Y, X)
+
+  -> Stage 2: Preprocess (VascuMap.preprocess)
+      - Selects focus-informed z-range
+      - Resamples to 5x2x2 um voxel size
+
+  -> standardised stack
+
+  -> Stage 3: Model Inference (VascuMap.model_inference)
+      - Pix2Pix 3D: brightfield -> fluorescence
+      - Resample to 2 um isotropic
+      - 2.5D U-Net segmentation
+      - Hysteresis thresholding -> binary mask
+
+  -> vessel_pred_iso, vessel_proba_iso, vessel_mask_iso
+
+  -> Stage 4: Postprocess (VascuMap.postprocess)
+      - Trims to strongly-focused z-planes
+      - Crops XY edges by device_width_um
+
+  -> trimmed volumes
+
+  -> Stage 5: Skeletonisation and Analysis (VascuMap.skeletonisation_and_analysis)
+      - GPU smoothing + hole filling + EDT
+      - 3D skeletonisation (skimage)
+      - sknw graph extraction
+      - Prune + clean graph
+      - Compute global morphometric metrics
+
+  -> analysis_results dict
+
+  -> Stage 6: Save Outputs (VascuMap.pipeline)
+      - .npy volumes, .csv metrics, .tif overlays
 ```
 
-**Data flow summary:**
-```
-.lif file → Brightfield Z-stack → Pseudo-fluorescence → Binary mask → Skeleton → Graph → Metrics
-```
+## 1.2 Key Concepts
 
-## 1.3 Key Concepts
+### Voxel Standardisation
 
-### Voxel Size and Isotropy
+Raw microscopy data is anisotropic (Z spacing ≠ XY spacing). The pipeline standardises in two steps:
 
-Raw microscopy data has **anisotropic voxels** (Z spacing ≠ XY spacing). This causes problems for skeletonization and metric computation. VascuMap3D handles this with two-stage rescaling:
+| Stage | Voxel Size |
+|-------|-----------|
+| After preprocess | 5 × 2 × 2 µm (Z × Y × X) |
+| After model inference | 2 × 2 × 2 µm isotropic |
 
-```
-Original acquisition:     Variable (depends on microscope settings)
-        ↓ Stage 1
-Reference voxel size:     5 × 2 × 2 µm (Z × Y × X) - Standardized
-        ↓ Stage 2  
-Isotropic for analysis:   2 × 2 × 2 µm (Z × Y × X) - Same in all dimensions
-```
+All downstream analysis uses the 2 µm isotropic representation.
 
-**Why 5×2×2 µm as reference?**
-- Z = 5 µm: Typical Z-step for confocal/brightfield
-- Y = X = 2 µm: Common lateral resolution at 10-20× magnification
+### Z-Vote System
 
-**Why make it isotropic?**
-- Skeletonization assumes equal spacing in all dimensions
-- Length/tortuosity metrics need consistent units
-- Cross-sectional area requires isotropic sampling
+During device segmentation, `DeviceSegmentationApp` generates a per-plane "vote count" (number of in-focus features detected per z-slice). The `preprocess` stage uses these votes to:
+1. Select the **longest contiguous run** of planes with ≥ 1 vote (the well-focused slab).
+2. Expand the range downward first, then upward, to meet a minimum `min_span_um` (default 160 µm).
 
-### Graph Representation
+The `postprocess` stage further trims to planes with **strong** votes (> 2), reducing noise from barely-focused edges.
 
-Vascular networks are naturally represented as graphs:
-- **Nodes** = Junction points (where vessels meet) + Endpoints (sprout tips)
-- **Edges** = Vessel segments between nodes
-- **Edge attributes** = Length, diameter, tortuosity, orientation
+### 2.5D Segmentation
 
-### Key Terminology
+The U-Net operates in 2D, but is run on all three orthogonal cross-sections (axial, coronal, sagittal) and the probability maps are averaged. This gives better 3D consistency than axial-only inference without the memory cost of a full 3D model.
 
-| Term | Definition |
-|------|------------|
-| **Vessel segment** | A continuous tube between two junction points |
-| **Junction** | Where vessels meet or bifurcate (node degree > 2) |
-| **Endpoint/Sprout tip** | Terminal point of a vessel (node degree = 1) |
-| **Sprout** | Vessel segment connected to an endpoint |
-| **Branch** | Vessel segment between two junctions |
-| **Tortuosity** | Path length / straight-line distance (≥1, higher = more curved) |
-| **EDT** | Euclidean Distance Transform - distance to nearest boundary |
+### Graph Pruning
 
-## 1.4 System Requirements
-
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| Python | 3.9 | 3.10+ |
-| GPU | 8GB VRAM | 16GB+ VRAM |
-| RAM | 16GB | 32GB+ |
-| CUDA | 11.x | 12.x |
-
-**Installation:**
-```bash
-git clone <repository_url>
-cd VascuMap3D
-pip install -r requirements.txt
-```
+After `sknw` builds the initial graph from the skeleton:
+1. **`prune_graph`**: Removes terminal branches where the endpoint-end of the branch has a small EDT relative to the junction end (i.e., branches that taper off into noise). A `length_cutoff` also removes very short stubs.
+2. **`remove_mid_node`**: Merges degree-2 nodes (passthrough nodes) to produce a clean graph where every node is either a junction (degree ≥ 3) or an endpoint (degree = 1).
+3. **`collect_border_vicinity_edges`**: Removes edges that pass within `vicinity_xy=50` pixels of the XY border (where the device wall may create artefacts).
+4. **`collect_exclusion_zone_edges`** (if organoid masking enabled): Removes edges passing through the organoid/central region.
 
 ---
 
-# 2. Detailed Workflow
+# 2. VascuMap Class
 
-## 2.1 Training
+**Source:** `vascumap.py`
 
-> **Note for beginners:** This section explains how to train the deep learning models. If you're new to deep learning, don't worry - we'll explain the key concepts along the way. Training requires a GPU with at least 8GB of memory.
+The top-level workflow container. Handles the full pipeline from device segmentation to output saving.
 
-### 2.1.1 Image Translation (3D Pix2Pix)
-
-#### What is Image Translation?
-
-Image translation is like teaching a computer to "translate" one type of image into another - similar to how Google Translate converts English to French. In our case:
-
-- **Input**: Brightfield microscopy (low contrast, vessels hard to see)
-- **Output**: Fluorescence-like image (high contrast, vessels clearly visible)
-
-The model learns this translation by looking at many paired examples: "here's a brightfield image, and here's what the same sample looks like in fluorescence."
-
-#### How Does Pix2Pix Work?
-
-Pix2Pix is a type of **Generative Adversarial Network (GAN)** - a clever training setup with two neural networks competing:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Pix2Pix Architecture                               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   GENERATOR (The Artist)                                                     │
-│   ──────────────────────                                                     │
-│   • Takes brightfield image as input                                        │
-│   • Tries to create a convincing fluorescence-like image                    │
-│   • Structure: 3D U-Net (encodes image, then decodes to output)            │
-│   • Goal: Fool the discriminator AND match the real fluorescence           │
-│                                                                              │
-│                              ↓                                               │
-│                                                                              │
-│   DISCRIMINATOR (The Critic)                                                 │
-│   ──────────────────────────                                                 │
-│   • Sees pairs: (brightfield + generated) vs (brightfield + real)          │
-│   • Tries to tell which fluorescence image is real vs fake                 │
-│   • Structure: 3D PatchGAN (looks at small patches, not whole image)       │
-│   • Goal: Correctly identify fake images                                   │
-│                                                                              │
-│   TRAINING LOOP                                                              │
-│   ─────────────                                                              │
-│   1. Generator creates fake fluorescence from brightfield                   │
-│   2. Discriminator tries to spot the fake                                   │
-│   3. Generator improves to fool discriminator better                        │
-│   4. Discriminator improves to catch fakes better                           │
-│   5. Repeat until generator makes realistic images                          │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-#### Why 3D?
-
-Unlike standard Pix2Pix which works on 2D images, we use **3D convolutions** because:
-- Vessels are 3D structures - context from adjacent Z-slices helps
-- Maintains spatial coherence across the Z-stack
-- Better handles vessels that are tilted or curved through the volume
-
-#### Loss Functions Explained
-
-The generator is trained with multiple loss functions working together:
-
-| Loss | What it Does | Why it Matters |
-|------|-------------|----------------|
-| **Adversarial (BCE)** | Encourages realistic-looking output | Makes images that "look right" |
-| **L1 (Mean Absolute Error)** | Penalizes pixel-by-pixel differences | Ensures correct brightness/structure |
-| **MSE (Mean Squared Error)** | Like L1 but penalizes large errors more | Prevents major mistakes |
-
-Combined: `Total Loss = Adversarial + 100×L1 + 100×MSE`
-
-The factor of 100 (λ) gives more weight to matching the actual image than just fooling the discriminator.
-
-#### Input Data Format
-
-You need **paired** 3D volumes - each brightfield volume must have a corresponding fluorescence volume:
-
-```
-/data/
-├── input/                          # Brightfield volumes
-│   ├── sample_001.nii.gz
-│   ├── sample_002.nii.gz
-│   └── ...
-└── target/                         # Fluorescence volumes (ground truth)
-    ├── sample_001.nii.gz           # MUST match input filenames exactly
-    ├── sample_002.nii.gz
-    └── ...
-```
-
-**Volume requirements:**
-
-| Property | Requirement | Why |
-|----------|-------------|-----|
-| Format | NIfTI (`.nii.gz`) | Standard medical imaging format |
-| Dimensions | 3D (Z, Y, X) | Typically 16-32 × 256 × 256 voxels |
-| Values | Normalized to [0, 1] | Neural networks work best with small numbers |
-| Data type | Float32 | Sufficient precision, reasonable memory |
-| Voxel size | Should match | Input and target must have same voxel dimensions |
-
-**Preparing your data:**
+## 2.1 Constructor
 
 ```python
-import nibabel as nib
-import numpy as np
-
-# Load your 3D volume
-volume = ...  # Your data loading
-
-# Normalize to [0, 1]
-volume = (volume - volume.min()) / (volume.max() - volume.min())
-
-# Save as NIfTI
-nifti_img = nib.Nifti1Image(volume.astype(np.float32), np.eye(4))
-nib.save(nifti_img, 'sample_001.nii.gz')
-```
-
-#### Training Command
-
-```bash
-python -m vascumap.models.image_translation.train \
-    --input_path /path/to/input \
-    --target_path /path/to/target \
-    --model_path /path/to/save \
-    --batch_size 4 \
-    --epochs 200
-```
-
-**Key parameters:**
-
-| Parameter | Default | What it Does | Recommendations |
-|-----------|---------|--------------|-----------------|
-| `batch_size` | 4 | Samples per training step | Lower if out of memory |
-| `epochs` | 200 | Full passes through dataset | More epochs = longer training |
-| `generator_lr` | 1e-3 | Generator learning rate | Don't change unless needed |
-| `discriminator_lr` | 1e-6 | Discriminator learning rate | Much lower than generator |
-
-**Key functions:** [`ImageDataset3D`](#imagedataset3d), [`Generator`](#generator), [`Discriminator`](#discriminator), [`Pix2Pix`](#pix2pix)
-
-#### Monitoring Training
-
-Launch TensorBoard to visualize training progress:
-
-```bash
-tensorboard --logdir /path/to/save
-```
-
-Then open `http://localhost:6006` in your browser.
-
-**Metrics to watch:**
-
-| Metric | What it Means | Good Values | Concerning Signs |
-|--------|---------------|-------------|------------------|
-| `train_g_loss` | Generator total loss | Decreasing over time | Stuck high or increasing |
-| `train_d_loss` | Discriminator loss | Stable around 0.5-1.0 | Very low (<0.1) or very high (>2) |
-| `val_g_psnr` | Image quality (Peak Signal-to-Noise) | > 20 dB | < 15 dB |
-| `val_g_ssim` | Structural similarity | > 0.5 | < 0.3 |
-| `val_g_accuracy` | How often generator fools discriminator | ~50% | 0% or 100% |
-| `val_d_accuracy` | Discriminator correctness | ~50% | 0% or 100% |
-
-**What "50% discriminator accuracy" means:**
-- If the discriminator is too good (accuracy > 90%), the generator can't learn
-- If the discriminator is too bad (accuracy < 10%), the generator has no guidance
-- 50% means they're evenly matched - ideal for learning
-
-**Common problems and solutions:**
-
-| Problem | Symptom | Solution |
-|---------|---------|----------|
-| Mode collapse | Generator produces same output for all inputs | Lower learning rates, add dropout |
-| Discriminator wins | D accuracy > 90%, G loss not decreasing | Reduce discriminator_lr |
-| Generator wins | D accuracy < 10%, images look blurry | Increase discriminator_lr |
-| Out of memory | CUDA out of memory error | Reduce batch_size |
-
-#### When is Training Done?
-
-Training is complete when:
-1. **val_g_psnr** stabilizes above 20 dB
-2. **val_g_ssim** stabilizes above 0.5
-3. Visual inspection shows good quality images
-
-The best model checkpoint is automatically saved based on validation SSIM.
-
----
-
-### 2.1.2 Segmentation (2D U-Net)
-
-#### What is Segmentation?
-
-Segmentation is labeling each pixel in an image. For vessel segmentation:
-- **Input**: Grayscale microscopy image
-- **Output**: Binary mask where white = vessel, black = background
-
-#### Why 2D Instead of 3D?
-
-We use a 2D model because:
-
-| Advantage | Explanation |
-|-----------|-------------|
-| **Pretrained weights** | 2D models have weights trained on millions of images (ImageNet) |
-| **Lower memory** | 3D models need 10-100× more GPU memory |
-| **More data** | Can extract many 2D slices from each 3D volume |
-| **Proven performance** | 2D + 2.5D inference works as well as 3D for vessels |
-
-To get 3D consistency, we use **2.5D inference** (see [Section 2.2.4](#224-segmentation-inference-25d)).
-
-#### Understanding U-Net Architecture
-
-U-Net has two parts: an **encoder** (compresses the image) and a **decoder** (expands back to full resolution):
-
-```
-U-Net Architecture
-                                                                      
-  Input (256×256)                                         Output (256×256)
-       │                                                       ▲
-       ▼                                                       │
-  ┌─────────┐                                             ┌─────────┐
-  │ Encoder │ ────────── Skip Connection ─────────────────│ Decoder │
-  │ Block 1 │                                             │ Block 1 │
-  └────┬────┘                                             └────▲────┘
-       │ (Downsample)                               (Upsample) │
-       ▼                                                       │
-  ┌─────────┐                                             ┌─────────┐
-  │ Encoder │ ────────── Skip Connection ─────────────────│ Decoder │
-  │ Block 2 │                                             │ Block 2 │
-  └────┬────┘                                             └────▲────┘
-       │                                                       │
-       ▼                                                       │
-       ... (more layers) ...                                   ...
-       │                                                       │
-       ▼                                                       │
-  ┌─────────────────────────────────────────────────────────────┐
-  │                      Bottleneck                              │
-  │              (Smallest, most abstract features)              │
-  └─────────────────────────────────────────────────────────────┘
-
-Skip Connections: Pass high-resolution details directly to decoder
-Bottleneck: Learns "what is a vessel" at abstract level
-```
-
-**The encoder-decoder design:**
-- **Encoder**: Progressively shrinks image, learning "what" is present
-- **Decoder**: Progressively expands, learning "where" things are
-- **Skip connections**: Copy fine details from encoder to decoder (critical for precise boundaries)
-
-#### Choosing an Encoder
-
-The encoder is the "backbone" that extracts features. We use pretrained encoders from `segmentation_models_pytorch`:
-
-| Encoder Family | Examples | Characteristics | Recommendation |
-|----------------|----------|-----------------|----------------|
-| **MiT (SegFormer)** | `mit_b0` to `mit_b5` | Transformer-based, best accuracy | **Recommended** |
-| ResNet | `resnet18`, `resnet34`, `resnet50`, `resnet101` | Classic CNN, fast | Good baseline |
-| EfficientNet | `efficientnet-b0` to `efficientnet-b7` | Efficient, good accuracy/speed | Good alternative |
-| SE-ResNet | `se_resnet50`, `se_resnext50_32x4d` | ResNet with attention | Slightly better than ResNet |
-
-**MiT-B5 (our recommendation):**
-- Based on SegFormer transformer architecture
-- Excellent at capturing long-range dependencies (important for connected vessels)
-- `b0` to `b5` = increasing model size (b5 is largest/most accurate)
-
-#### Choosing a Model Architecture
-
-The "model" is the overall structure (U-Net is most common):
-
-| Model | Description | When to Use |
-|-------|-------------|-------------|
-| **Unet** | Classic encoder-decoder with skip connections | Default choice, works for most cases |
-| **Unet++** | Nested skip connections | Slightly better for small structures |
-| **DeepLabV3+** | Atrous convolutions for multi-scale | Good for varying vessel sizes |
-| **FPN** | Feature Pyramid Network | Good for multi-scale detection |
-| **MAnet** | Multi-scale attention | Variable feature scales |
-
-**For vessel segmentation, we recommend: `Unet` + `mit_b5`**
-
-#### Loss Functions Explained
-
-We use two losses that complement each other:
-
-| Loss | Formula | What it Does | Why Needed |
-|------|---------|--------------|------------|
-| **Dice Loss** | `1 - 2×(pred∩true)/(pred+true)` | Measures overlap between prediction and ground truth | Handles class imbalance (few vessel pixels vs many background) |
-| **BCE Loss** | `-[y×log(p) + (1-y)×log(1-p)]` | Per-pixel classification loss | Provides stable gradients for learning |
-
-**Why both?** Dice alone can be unstable early in training; BCE alone struggles with class imbalance. Together they work well.
-
-#### Input Data Format
-
-You need paired images and masks:
-
-```
-/data/
-├── images/                         # Grayscale microscopy crops
-│   ├── crop_001.tif
-│   ├── crop_002.tif
-│   └── ...
-└── masks/                          # Binary ground truth masks
-    ├── crop_001.tif                # MUST have same filename as image
-    ├── crop_002.tif
-    └── ...
-```
-
-**Image requirements:**
-
-| Property | Requirement | Why |
-|----------|-------------|-----|
-| Format | TIFF (`.tif`) | Preserves quality, no compression artifacts |
-| Dimensions | 256 × 256 pixels | Balance of detail and memory usage |
-| Channels | 1 (grayscale) | Microscopy is typically grayscale |
-| Values | Float32, range [0, 1] | Normalized for neural network |
-| Preprocessing | Contrast-adjusted | Standardizes intensity range |
-
-**Mask requirements:**
-
-| Property | Requirement | Why |
-|----------|-------------|-----|
-| Format | Same as images | Consistency |
-| Dimensions | Same as corresponding image | Must align pixel-by-pixel |
-| Values | Binary: 0.0 or 1.0 | Background vs vessel |
-| Data type | Float32 | Matches image format |
-
-#### Preparing Training Data
-
-**Step 1: Extract 2D crops from your 3D volumes**
-
-```python
-import tifffile
-import numpy as np
-from vascumap.pipeline.utils import contrast, scale
-
-# Load your 3D stack
-stack = tifffile.imread('volume.tif')  # Shape: (Z, Y, X)
-mask_3d = tifffile.imread('mask.tif')
-
-# Extract 256×256 crops from each Z-slice
-crop_size = 256
-for z in range(stack.shape[0]):
-    for i, (y, x) in enumerate(get_crop_positions(stack.shape[1:], crop_size)):
-        # Extract image crop
-        img_crop = stack[z, y:y+crop_size, x:x+crop_size]
-        
-        # Preprocess: contrast adjustment + normalization
-        img_crop = contrast(img_crop, 1, 99)  # Clip to 1st-99th percentile
-        img_crop = scale(img_crop)             # Normalize to [0, 1]
-        
-        # Extract corresponding mask crop
-        mask_crop = mask_3d[z, y:y+crop_size, x:x+crop_size]
-        mask_crop = (mask_crop > 0).astype(np.float32)  # Ensure binary
-        
-        # Save
-        tifffile.imwrite(f'images/z{z:03d}_crop{i:03d}.tif', img_crop.astype(np.float32))
-        tifffile.imwrite(f'masks/z{z:03d}_crop{i:03d}.tif', mask_crop)
-```
-
-**Step 2: Verify your data**
-
-```python
-# Check a few samples
-img = tifffile.imread('images/z000_crop000.tif')
-mask = tifffile.imread('masks/z000_crop000.tif')
-
-print(f"Image shape: {img.shape}")        # Should be (256, 256)
-print(f"Image range: [{img.min():.2f}, {img.max():.2f}]")  # Should be ~[0, 1]
-print(f"Mask unique values: {np.unique(mask)}")  # Should be [0, 1]
-```
-
-**Key functions:** [`contrast`](#contrast), [`scale`](#scale)
-
-#### Handling Grayscale with Pretrained Weights
-
-Most pretrained encoders expect 3-channel RGB images. Our microscopy is 1-channel grayscale. The code automatically adapts the first layer:
-
-```python
-# Original first layer: Conv2d(3, 64, kernel_size=7)
-#   - Expects 3 input channels (R, G, B)
-#   - Each channel has its own weights
-
-# Adapted layer: Conv2d(1, 64, kernel_size=7)
-#   - Accepts 1 input channel (grayscale)
-#   - Weights = sum of original RGB weights
-
-# This is done automatically by adapt_input_model()
-```
-
-**Why summing works:** The RGB weights learned complementary features. Summing them creates a reasonable grayscale feature extractor.
-
-**Key function:** [`adapt_input_model`](#adapt_input_model)
-
-#### Training Command
-
-```bash
-python -m vascumap.models.segmentation.training \
-    --images_dir_path /path/to/images \
-    --masks_dir_path /path/to/masks \
-    --model_dir_path /path/to/save \
-    --model_architecture Unet \
-    --encoder_architecture mit_b5 \
-    --input_channels 1 \
-    --weights imagenet \
-    --epochs 200 \
-    --batch_size 16 \
-    --learning_rate 1e-3 \
-    --fp16
-```
-
-**All parameters explained:**
-
-| Parameter | Default | What it Does | Recommendations |
-|-----------|---------|--------------|-----------------|
-| `--images_dir_path` | Required | Folder with training images | - |
-| `--masks_dir_path` | Required | Folder with training masks | - |
-| `--model_dir_path` | Required | Where to save checkpoints | - |
-| `--model_architecture` | `Unet` | Model type (see table above) | Start with `Unet` |
-| `--encoder_architecture` | `mit_b5` | Encoder backbone | `mit_b5` for best accuracy |
-| `--input_channels` | `1` | Number of image channels | `1` for grayscale |
-| `--weights` | `imagenet` | Pretrained weights | Always use `imagenet` |
-| `--epochs` | `200` | Training iterations | 100-300 depending on dataset |
-| `--batch_size` | `16` | Samples per step | Reduce if out of memory |
-| `--learning_rate` | `1e-3` | Step size for optimization | Don't change unless needed |
-| `--fp16` | `False` | Use half precision | Add flag to save memory |
-
-**Key functions:** [`SegmentationModule`](#segmentationmodule), [`build_model`](#build_model), [`load_data`](#load_data)
-
-#### Monitoring Training
-
-The training logs show these metrics:
-
-| Metric | What it Means | Good Values | Warning Signs |
-|--------|---------------|-------------|---------------|
-| `train_loss` | Combined Dice+BCE on training data | Decreasing | Stuck or increasing |
-| `val_loss` | Loss on validation data | Decreasing, close to train_loss | Much higher than train_loss (overfitting) |
-| `train_dice` | Overlap between prediction and truth | Increasing toward 1.0 | Stuck below 0.5 |
-| `val_dice` | Dice on validation data | > 0.7 | < 0.5 |
-| `train_iou` | Intersection over Union | Increasing toward 1.0 | Stuck low |
-| `val_iou` | IoU on validation data | > 0.6 | < 0.4 |
-
-**Understanding Dice and IoU:**
-
-```
-Dice = 2 × (Overlap) / (Predicted + Truth)
-IoU  = Overlap / (Predicted ∪ Truth)
-
-Example:
-  Predicted:  ████░░░░     (4 pixels)
-  Truth:      ░░████░░     (4 pixels)
-  Overlap:    ░░██░░░░     (2 pixels)
-  
-  Dice = 2×2 / (4+4) = 0.5
-  IoU  = 2 / (4+4-2) = 0.33
-```
-
-**Learning rate schedule:**
-
-The learning rate is automatically reduced halfway through training:
-- Epochs 1-100: LR = 0.001
-- Epochs 101-200: LR = 0.0005
-
-This helps fine-tune the model after initial learning.
-
-**When is training done?**
-
-1. `val_dice` > 0.7 and `val_iou` > 0.6
-2. Validation loss has stopped improving for 20+ epochs
-3. Visual inspection shows good segmentations
-
-Best checkpoint is automatically saved based on lowest `val_loss`.
-
----
-
-## 2.2 Inference Pipeline
-
-### 2.2.1 Data Loading & Voxel Normalization
-
-The pipeline reads Leica LIF files and normalizes voxel sizes:
-
-```python
-from vascumap.pipeline.data import get_stack_from_lif
-
-stack, voxel_size, [nz, ny, nx] = get_stack_from_lif(
-    lif_file='sample.lif',
-    stack_index=0,
-    ref_voxel_size=[5, 2, 2]  # Target: 5×2×2 µm
-)
-# Returns: (Z, Y, X, C) array, rescaled to reference voxel size
-```
-
-**What happens internally:**
-1. Read voxel size from LIF metadata
-2. Calculate rescale factors: `original_voxel / ref_voxel`
-3. Resample volume using cubic interpolation
-4. Validate Z-range ≥ 160 µm
-
-**Key function:** [`get_stack_from_lif`](#get_stack_from_lif)
-
----
-
-### 2.2.2 Preprocessing & Cropping
-
-The cropping pipeline solves all three challenges through four stages:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           CROPPING PIPELINE                                  │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   STAGE 1: AUTO-FOCUS                   Output: Height map + focused image  │
-│   ─────────────────────                                                      │
-│   Find the best Z for each XY position                                      │
-│                                                                              │
-│                   ↓                                                          │
-│                                                                              │
-│   STAGE 2: EDGE DETECTION               Output: Edge map                    │
-│   ─────────────────────                                                      │
-│   Find sample boundaries in the focused image                               │
-│                                                                              │
-│                   ↓                                                          │
-│                                                                              │
-│   STAGE 3: TEMPLATE REGISTRATION        Output: Transformation parameters  │
-│   ────────────────────────────                                               │
-│   Match a reference template to the detected edges                          │
-│                                                                              │
-│                   ↓                                                          │
-│                                                                              │
-│   STAGE 4: GEOMETRIC CROPPING           Output: Cropped stack               │
-│   ─────────────────────────                                                  │
-│   Extract the registered ROI in both Z and XY                              │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-#### Stage 1: Auto-Focus (Finding the Curved Surface)
-
-**The Problem:**
-The sample surface is curved. If we just take a single Z-slice, some areas would be in focus and others blurry. We need to find the "surface" of the sample.
-
-**The Solution:**
-Create a **height map** - for each (X, Y) position, store which Z-slice is in focus.
-
-**Algorithm Walkthrough:**
-
-```
-Step 1: Sample sparse grid points
-─────────────────────────────────
-We don't check every pixel (too slow). Instead, we sample a grid:
-
-Full image (1000×1000 pixels):
-┌────────────────────────────────────┐
-│  ·     ·     ·     ·     ·     ·   │
-│                                     │
-│  ·     ·     ·     ·     ·     ·   │    · = sampling point
-│                                     │        (n_sampling × n_sampling)
-│  ·     ·     ·     ·     ·     ·   │
-│                                     │
-│  ·     ·     ·     ·     ·     ·   │
-└────────────────────────────────────┘
-
-Step 2: At each point, find the best Z
-────────────────────────────────────────
-For each sampling point, we look at a patch around it across all Z-slices:
-
-Z=0:  ░░░░░    Z=1:  ░░▒░░    Z=2:  ░▒▓▒░    Z=3:  ░░▒░░    Z=4:  ░░░░░
-      ░░░░░          ░░▒░░          ▒▓█▓▒          ░░▒░░          ░░░░░
-      ░░░░░          ░░▒░░          ░▒▓▒░          ░░▒░░          ░░░░░
-      Blurry         Sharper        SHARPEST       Sharper        Blurry
-
-Focus measure = std(sobel(patch))
-  - Sobel detects edges
-  - Sharp images have more edges → higher std
-  - Select Z with maximum focus measure
-
-Step 3: Fit a plane to the sparse points
-──────────────────────────────────────────
-We have (x, y, z_best) for each sampling point. We fit a plane:
-
-    Z = a·X + b·Y + c
-
-This smooths out noise and gives us a continuous surface.
-
-Step 4: Create dense height map
-────────────────────────────────
-Apply the plane equation to every pixel to get the full height map.
-```
-
-**Code:**
-
-```python
-from vascumap.pipeline.preprocessing import auto_focus
-
-focused_image, height_map = auto_focus(
-    stack_bf,           # 3D brightfield stack: (Z, Y, X)
-    crop_window=50,     # Pixels to exclude from border
-    n_sampling=20,      # Grid will be 20×20 = 400 points
-    window_size=50      # Each patch is 100×100 pixels (±50)
-)
-
-# focused_image: 2D image showing the in-focus surface
-# height_map: 2D array of Z-indices (same shape as focused_image)
-```
-
-**Parameters:**
-
-| Parameter | What it Does | Typical Value | Notes |
-|-----------|--------------|---------------|-------|
-| `crop_window` | Excludes image borders | 50-200 | Borders often have artifacts |
-| `n_sampling` | Grid density | 5-20 | More = slower but more accurate |
-| `window_size` | Patch size for focus | 50-100 | Larger = more robust to noise |
-
-**Key function:** [`auto_focus`](#auto_focus)
-
----
-
-#### Stage 2: Edge Detection (Finding Sample Boundaries)
-
-**The Problem:**
-We need to find where the sample is in the image so we can align our template to it.
-
-**The Solution:**
-Use Sobel edge detection to highlight the sample boundaries.
-
-**How Sobel Works:**
-
-```
-Sobel detects intensity changes (edges) in an image:
-
-Original:                    After Sobel:
-┌────────────────────┐       ┌────────────────────┐
-│████████░░░░░░░░░░░░│       │░░░░░░░█░░░░░░░░░░░░│  ← Edge detected
-│████████░░░░░░░░░░░░│       │░░░░░░░█░░░░░░░░░░░░│    at boundary
-│████████░░░░░░░░░░░░│  →    │░░░░░░░█░░░░░░░░░░░░│
-│████████░░░░░░░░░░░░│       │░░░░░░░█░░░░░░░░░░░░│
-│░░░░░░░░░░░░░░░░░░░░│       │░░░░░░░░░░░░░░░░░░░░│
-└────────────────────┘       └────────────────────┘
-```
-
-**Processing Steps:**
-
-```python
-# 1. Downsample for speed (10% of original size)
-im_r = rescale(focused_image, 0.1)
-
-# 2. Compute Sobel gradients in both directions
-edges_x = sobel_h(im_r)  # Horizontal edges
-edges_y = sobel_v(im_r)  # Vertical edges
-
-# 3. Combine into gradient magnitude
-edges = sqrt(edges_x² + edges_y²)
-
-# 4. Smooth to reduce noise
-edges = gaussian(edges, sigma=2.5)
-
-# 5. Threshold high values (removes noise)
-edges = clip(edges, 0, 0.15)
-
-# 6. Resize back to original
-edges = resize(edges, original_shape)
-```
-
----
-
-#### Stage 3: Template Registration (Aligning to a Reference)
-
-**The Problem:**
-We have edges showing the sample boundary. We need to figure out exactly where to crop. This is solved by aligning a **pre-defined template** to the detected edges.
-
-**What is a Template?**
-
-A template consists of two files:
-
-```
-crop_profiles/
-├── {profile}_fiducials.npy    # Points that should align with edges
-└── {profile}_rect.npy         # The ROI we want to extract
-```
-
-**Fiducials:** Points along the sample boundary that we expect to see in every image.
-**Rectangle:** The four corners of the region we want to extract.
-
-
-**The Registration Process:**
-
-We find the transformation (scale, rotation, translation) that best aligns the template fiducials with the detected edges.
-
-```
-Transformation Parameters:
-  - scale: How much to resize the template (usually ~1.0)
-  - theta: Rotation angle in radians
-  - tx: Translation in X
-  - ty: Translation in Y
-
-Mathematical formulation:
-  
-  transformed_point = scale × (original_point × rotation_matrix) + translation
-  
-  where rotation_matrix = [cos(θ)  -sin(θ)]
-                          [sin(θ)   cos(θ)]
-```
-
-**Optimization Strategy:**
-
-Finding the best transformation is an optimization problem. We use a two-stage approach:
-
-```
-Stage 1: BASIN-HOPPING (Global Search)
-────────────────────────────────────────
-Problem: The objective function has many local minima.
-Solution: Try many random starting points, do local optimization from each.
-
-
-Stage 2: POWELL (Local Refinement)
-──────────────────────────────────
-Take the best result from basin-hopping and refine it further.
-Powell method: Optimizes one parameter at a time, then repeats.
-```
-
-**The Objective Function:**
-
-```python
-def objective_function(params, template_coords, edge_image):
-    """
-    Score how well the transformed template matches the edges.
-    
-    Lower score = better match (we minimize this).
-    """
-    # Transform template points using current params
-    transformed = transform_coords(template_coords, params)
-    
-    # Check how many points are inside the image
-    valid_mask = points_inside_image(transformed)
-    valid_ratio = sum(valid_mask) / len(template_coords)
-    
-    # Penalize heavily if too many points are outside
-    if valid_ratio < 0.9:
-        return large_penalty  # Bad transformation
-    
-    # Sample edge values at transformed points
-    edge_responses = edge_image[transformed_y, transformed_x]
-    
-    # Good alignment = high edge values = low cost
-    return -mean(edge_responses)
-```
-
-**Key functions:** [`register_high_level`](#register_high_level), [`transform_coords`](#transform_coords), [`objective_function`](#objective_function), [`register_neck_coords_advanced`](#register_neck_coords_advanced)
-
----
-
-#### Stage 4: Geometric Cropping (Extracting the ROI)
-
-**The Problem:**
-We now know where the ROI is (transformed rectangle coordinates). We need to extract it from the 3D stack.
-
-**Two Sub-Problems:**
-
-1. **Z-Cropping:** Extract a slab of the right thickness, following the curved surface
-2. **XY-Cropping:** Extract the (possibly rotated) quadrilateral and warp it to a rectangle
-
-**Z-Cropping - Following the Surface:**
-
-The height map from Stage 1 tells us where the surface is. We extract a slab centered on this surface:
-
-
-```python
-# For each (y, x), we extract Z slices from:
-#   grid[y, x] - z_range/2  to  grid[y, x] + z_range/2
-# 
-# This creates a "slab" that follows the curved surface
-```
-
-**XY-Cropping - Warping the Quadrilateral:**
-
-The ROI is defined by 4 corners which may form a non-axis-aligned quadrilateral.
-
-
-```python
-from vascumap.pipeline.preprocessing import crop_stack
-
-cropped = crop_stack(
-    stack,                      # Input: (Z, Y, X, C)
-    crop_profile='dorota',      # Template name
-    bf_index=0,                 # Which channel to use for registration
-    mode='3D',                  # '3D' extracts a slab; '2D' extracts single slice
-    z_range=200,                # Thickness in µm
-    ref_voxel_size=[5, 2, 2],   # Voxel size for Z-range conversion
-    lif_path_root='/output',    # Save debug images here
-    filename='sample1'          # Prefix for debug images
+vm = VascuMap(
+    pix2pix_model_path: str,          # Path to .ckpt checkpoint
+    unet_model_path: str,             # Path to .pth checkpoint
+    use_device_segmentation_app: bool = True,
+    # --- No-GUI only ---
+    image_source_path: str | None = None,
+    image_index: int = 0,
+    device_width_um: float = 35.0,
+    mask_central_region: bool = False,
+    channel: int = 0,
 )
 ```
 
-**Key functions:** [`crop_stack`](#crop_stack), [`crop_stack_z`](#crop_stack_z), [`apply_affine_crop_simple`](#apply_affine_crop_simple)
+**GUI mode (`use_device_segmentation_app=True`):**
+Launches `DeviceSegmentationApp` in napari. The constructor blocks until the viewer is closed, then collects the cropped stack and metadata.
 
----
+**No-GUI mode (`use_device_segmentation_app=False`):**
+Runs `DeviceSegmentationApp.run_automatic(...)` headlessly. Requires `image_source_path` to exist and be `.tif`/`.tiff`/`.lif`.
 
-#### Creating Custom Crop Profiles
+**Instance attributes set after construction:**
 
-To use the cropping pipeline with your own sample type, you need to create a template.
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `cropped_stack` | ndarray | XY-cropped brightfield stack (Z, Y, X) |
+| `device_width_um` | float | Device width margin in µm |
+| `pixel_size_um` | dict | Keys: `z_um`, `y_um`, `x_um` |
+| `z_votes` | dict | Per-plane focus vote counts |
+| `image_name` | str | Image identifier (from filename/metadata) |
+| `mask_central_region_enabled` | bool | Whether organoid masking was used |
+| `cropped_organoid_mask_xy` | ndarray or None | 2D organoid exclusion mask |
 
-**Step 1: Get a Representative Image**
-
-```python
-from vascumap.pipeline.preprocessing import auto_focus
-
-# Load a typical sample
-stack = ...  # Your 3D stack
-
-# Get a focused 2D image
-focused_image, _ = auto_focus(stack[..., 0])  # Use brightfield channel
-```
-
-**Step 2: Annotate Fiducial Points**
-
-Using a tool like Napari, FIJI, or matplotlib, manually click points along the sample boundary:
+## 2.2 `preprocess()`
 
 ```python
-import matplotlib.pyplot as plt
-import numpy as np
-
-# Display the image
-fig, ax = plt.subplots()
-ax.imshow(focused_image, cmap='gray')
-
-# Collect clicks
-fiducials = []
-def onclick(event):
-    fiducials.append([event.ydata, event.xdata])  # Note: (y, x) order
-    ax.plot(event.xdata, event.ydata, 'r.', markersize=5)
-    fig.canvas.draw()
-
-fig.canvas.mpl_connect('button_press_event', onclick)
-plt.show()
-
-# After clicking, convert to array
-fiducials = np.array(fiducials)  # Shape: (N, 2) with columns [y, x]
-```
-
-**Tips for good fiducials:**
-- Place points along strong edges (sample boundary)
-- Space them evenly around the boundary
-- Use 50-200 points for good coverage
-- Avoid points on features that vary between samples
-
-**Step 3: Define the ROI Rectangle**
-
-Define the 4 corners of your region of interest (clockwise from top-left):
-
-```python
-# Corners in (y, x) format
-rect = np.array([
-    [y_top_left,     x_top_left],
-    [y_top_right,    x_top_right],
-    [y_bottom_right, x_bottom_right],
-    [y_bottom_left,  x_bottom_left],
-])
-```
-
-**Step 4: Save the Profile**
-
-```python
-np.save('crop_profiles/myprofile_fiducials.npy', fiducials)
-np.save('crop_profiles/myprofile_rect.npy', rect)
-```
-
-**Step 5: Test the Profile**
-
-```python
-from vascumap.pipeline.preprocessing import crop_stack
-
-# Test on a few samples
-cropped = crop_stack(
-    test_stack,
-    crop_profile='myprofile',
-    bf_index=0,
-    mode='3D',
-    z_range=200,
-    lif_path_root='./debug',  # Check the debug images!
-    filename='test'
+vm.preprocess(
+    cropped_stack=None,     # Defaults to self.cropped_stack
+    pixel_size_um=None,     # Defaults to self.pixel_size_um
+    z_votes=None,           # Defaults to self.z_votes
+    min_span_um=160.0       # Minimum z-slab thickness (µm)
 )
 ```
 
-Check the saved `*_crop_overview.png` to see if registration worked correctly.
+1. Parses `z_votes` into a `{int: int}` vote map (keys can be integers or `"z12"` strings).
+2. Finds the longest contiguous run of z-planes with ≥ 1 vote.
+3. Expands the range to cover at least `min_span_um` (extends downward first, then upward).
+4. Crops `cropped_stack` to the selected z range.
+5. Calls `resize_dask` to resample the stack to 5×2×2 µm (using `pixel_size_um`).
 
-**Common Issues and Solutions:**
+Sets `self.initial_z_range`, `self.cropped_stack`, `self._pre_z_start_global`, `self._pre_z_um`.
 
-| Problem | Symptom | Solution |
-|---------|---------|----------|
-| Template too large | Points go outside image | Scale down template coordinates |
-| Not enough fiducials | Poor alignment | Add more fiducial points |
-| Fiducials on variable features | Inconsistent alignment | Move fiducials to stable boundaries |
-| Optimization stuck | Bad crop location | Try different initial parameters |
-
----
-
-### 2.2.3 Image Translation Inference
-
-Run the Pix2Pix model to translate brightfield to fluorescence-like:
+## 2.3 `model_inference()`
 
 ```python
-from vascumap.pipeline.prediction import load_pix2pix, predict_pix2pix
-
-model = load_pix2pix('translation.ckpt')
-
-pseudo_fluo = predict_pix2pix(
-    model,
-    stack_bf,           # (Z, Y, X)
-    device='cuda',
-    n_iter=1            # Monte Carlo averaging (for dropout uncertainty)
-)
-```
-
-**Inference details:**
-- Uses MONAI SlidingWindowInferer
-- ROI size: 32×512×512, overlap: 75%/25%/25%
-- Output clipped to [0, 1]
-
-**Key functions:** [`load_pix2pix`](#load_pix2pix), [`predict_pix2pix`](#predict_pix2pix)
-
----
-
-### 2.2.4 Segmentation Inference (2.5D)
-
-Run the segmentation model using **2.5D inference** - predictions along three orthogonal planes, averaged:
-
-```python
-from vascumap.pipeline.prediction import load_segmentation_model, predict_mask_ortho
-
-model = load_segmentation_model('segmentation.ckpt')
-
-probability_map = predict_mask_ortho(
-    model,
-    vessel_iso,         # Isotropic volume (Z, Y, X)
+vm.model_inference(
+    cropped_stack=None,        # Defaults to self.cropped_stack
     device='cuda'
 )
 ```
 
-**2.5D approach:**
-1. **Axial** (XY slices): Primary view, full resolution
-2. **Coronal** (XZ slices): Side view, 256×256 patches
-3. **Sagittal** (YZ slices): Front view, 256×256 patches
-4. **Average**: Final probability = mean of all three
+1. **Organoid masking** (if enabled): Fills the organoid XY region in each z slice with the slice's mean intensity, so the model sees only background there.
+2. **Pix2Pix** (`self.model_p2p.predict`): Translates the brightfield stack to a fluorescence-like volume using sliding-window inference (ROI: 32×512×512, overlap: 75%/25%/25%). Output is resampled with factor `[2.5, 1, 1]` to produce `vessel_pred_iso` at 2 µm isotropic.
+3. **U-Net segmentation** (`predict_mask_ortho`): Runs 2.5D inference along axial, coronal, and sagittal planes, averages the probability maps. Result stored as `vessel_proba_iso`.
+4. **Thresholding** (`process_vessel_mask`): Applies 3D median filter (size=7) then hysteresis thresholding (low=0.2, high=0.5). Result stored as `vessel_mask_iso`.
 
-**Post-processing:**
+## 2.4 `postprocess()`
+
 ```python
-from vascumap.pipeline.utils import process_vessel_mask
-
-binary_mask = process_vessel_mask(probability_map, ortho=True)
-# Applies: median filter (size=7) + hysteresis threshold (0.2, 0.5)
+vm.postprocess()
 ```
 
-**Key functions:** [`load_segmentation_model`](#load_segmentation_model), [`predict_mask_ortho`](#predict_mask_ortho), [`predict_mask`](#predict_mask), [`process_vessel_mask`](#process_vessel_mask)
+1. Finds the **longest contiguous run** of z-planes with `initial_z_range[z] > 2` (strong votes).
+2. Converts the strong-vote z-range from original voxel space to 2 µm isotropic indices.
+3. Trims `vessel_pred_iso`, `vessel_proba_iso`, and `vessel_mask_iso` to `[z_start:z_stop, ptr:-ptr, ptr:-ptr]` where `ptr = int(device_width_um)` pixels.
 
----
+Sets `self._z_start_final`, `self._z_stop_final`, `self._pixels_to_remove`.
 
-### Full Pipeline Command
+## 2.5 `skeletonisation_and_analysis()`
+
+```python
+vm.skeletonisation_and_analysis(
+    voxel_size_um=(2.0, 2.0, 2.0),
+    junction_distance_mode='skeleton'  # 'skeleton' or 'euclidean'
+)
+```
+
+Calls `clean_and_analyse` from `skeletonisation.py`. If `mask_central_region_enabled`, also builds an aligned XY exclusion mask matching the final volume shape and passes it to `clean_and_analyse`.
+
+Stores the result dict in `self.analysis_results` and prints the global metrics table.
+
+## 2.6 `pipeline()`
+
+```python
+vm.pipeline(
+    output_dir: str | Path | None = None,
+    save_all_interim: bool = False
+)
+```
+
+Runs all stages in sequence and saves outputs. See [Section 7](#7-output-files-and-metrics) for details.
+
+## 2.7 Command-Line Interface
 
 ```bash
-python -m vascumap.pipeline.main \
-    --lif_dir_path /path/to/lif/files \
-    --model_p2p_path /path/to/translation.ckpt \
-    --model_smp_path /path/to/segmentation.ckpt
+# GUI mode
+python vascumap.py [--output-dir /path/to/outputs] [--save-all-interim]
+
+# Batch / no-GUI mode
+python vascumap.py --no-gui \
+    --image-dir /path/to/microscopy/files \
+    --output-dir /path/to/outputs \
+    [--save-all-interim]
 ```
 
-**Output files (per sample):**
-- `*_vessel_mask.tif`: Binary segmentation
-- `*_overview.png`: Visual comparison
-- `*_crop_overview.png`: Registration debug (if cropping)
-
-**Key function:** [`run`](#run)
+In batch mode, all `.lif`, `.tif`, and `.tiff` files in `--image-dir` are processed. LIF files with multiple sub-images are iterated. Each image gets its own sub-folder under `--output-dir`. Failures are logged at the end rather than aborting the run.
 
 ---
 
-## 2.3 Graph Analysis
+# 3. Device Segmentation App
 
-### 2.3.1 Skeletonization
+**Source:** `gui_device_segmentation.py`
 
-Convert binary mask to 1-pixel-wide skeleton. Two methods available:
+`DeviceSegmentationApp` handles loading microscopy files, detecting the microfluidic device ROI, cropping the stack, and returning structured outputs.
 
-#### Method 1: Morphological Thinning
-
-Fast, iterative erosion preserving topology:
+## 3.1 Constructor
 
 ```python
-from vascumap.pipeline.skeletonization import skeletonize_3d_parallel
-
-skeleton = skeletonize_3d_parallel(
-    binary_mask,
-    chunk_size=(128, 128, 128)
+app = DeviceSegmentationApp(
+    enable_gui: bool = True,
+    low_frac: float = 0.82,       # Lower bound of expected device intensity
+    high_frac: float = 1.10,      # Upper bound
+    smooth_window: int = 5,
+    bin_size: float = 2.0,
+    min_run_frac: float = 0.25,
+    typical_pct: float = 50.0,
+    line_length: int = 400,       # Hough line detection min length
+    line_gap: int = 900,
+    hough_threshold: int = 70,
+    mask_sigma: float = 2.0,
+    mask_frac_thresh: float = 0.70,
 )
 ```
 
-**Best for:** Dense networks (vessel coverage > 30%)
+Always creates a `napari.Viewer`. When `enable_gui=False`, the viewer is hidden and the app runs headlessly.
 
-**Key function:** [`skeletonize_3d_parallel`](#skeletonize_3d_parallel)
+## 3.2 GUI Widgets
 
-#### Method 2: Mesh Contraction
+The napari control panel (right dock) contains:
 
-GPU-accelerated Laplacian smoothing on mesh:
+| Widget | Action |
+|--------|--------|
+| **Load images** | Browse to a `.lif`, `.tif`, or folder. Populates the image dropdown. |
+| **Segment + View** | Runs device detection; optionally ticks *Mask central region*. Displays the detected device boundary in the viewer. |
+| **Device width (um)** | Slider: sets device exclusion margin (µm). Updates the inner/outer ROI layers live. |
+| **Create cropped aligned** | Confirms the crop and stores the result for collection by `VascuMap`. |
+
+## 3.3 `run_automatic()`
 
 ```python
-from vascumap.pipeline.mesh_contraction import create_graph_contraction
-
-graph, mesh, simple_mesh, contracted = create_graph_contraction(
-    binary_edt,
-    time_lim=300  # seconds
+outputs = app.run_automatic(
+    image_source: Path,
+    image_index: int = 0,
+    device_width_um: float = 35.0,
+    mask_central_region: bool = False,
 )
 ```
 
-**Algorithm:**
-1. Generate surface mesh (Marching Cubes)
-2. Iteratively contract toward centerline
-3. Extract skeleton from contracted mesh
+Programmatic equivalent of: load images → segment → set device width → crop. Raises `RuntimeError` if no valid crop is found.
 
-**Best for:** Sparse networks, varying vessel diameters
+Returns the same tuple as `get_cropped_outputs()`.
 
-**Key functions:** [`create_graph_contraction`](#create_graph_contraction), [`contract_gpu`](#contract_gpu)
+## 3.4 `get_cropped_outputs()`
 
----
-
-### 2.3.2 Graph Construction
-
-Convert skeleton to NetworkX graph:
-
+Returns a tuple:
 ```python
-import sknw
-
-# Build graph from skeleton
-graph = sknw.build_sknw(skeleton_image)
-
-# Nodes have 'pts' attribute (coordinates)
-# Edges have 'pts' attribute (path coordinates)
-```
-
-**Post-processing:**
-1. **Pruning**: Remove spurious branches based on length/EDT ratio
-2. **Merge degree-2 nodes**: Simplify graph
-3. **Border trimming**: Remove edges near image boundaries
-
-```python
-from vascumap.pipeline.skeletonization import prune_graph, finalize_graph
-
-pruned = prune_graph(graph, area_3d, edt_cutoff=0.25, length_cutoff=25)
-final = finalize_graph(pruned, binary_edt)
-```
-
-**Key functions:** [`prune_graph`](#prune_graph), [`finalize_graph`](#finalize_graph), [`collect_border_vicinity_edges`](#collect_border_vicinity_edges)
-
----
-
-### 2.3.3 Metrics Computation
-
-Compute morphometric features from the graph:
-
-```python
-from vascumap.pipeline.metrics import (
-    compute_cross_sectional_areas,
-    compute_vessel_metrics,
-    compute_junction_metrics,
-    fractal_dimension_and_lacunarity,
-    convex_hull_volume
-)
-
-# Cross-sectional areas at skeleton points
-area_3d = compute_cross_sectional_areas(mask, skeleton, edt)
-
-# Per-vessel metrics
-vessel_df = compute_vessel_metrics(graph, area_3d, pd.DataFrame())
-
-# Per-junction metrics
-junction_df = compute_junction_metrics(graph, pd.DataFrame(), distance_threshold=250)
-
-# Global metrics
-fd, lacunarity = fractal_dimension_and_lacunarity(skeleton > 0)
-explant_vol = convex_hull_volume(mask)
-```
-
-**Key functions:** [`compute_cross_sectional_areas`](#compute_cross_sectional_areas), [`compute_vessel_metrics`](#compute_vessel_metrics), [`compute_junction_metrics`](#compute_junction_metrics), [`fractal_dimension_and_lacunarity`](#fractal_dimension_and_lacunarity), [`convex_hull_volume`](#convex_hull_volume)
-
----
-
-### 2.3.4 Output Files
-
-Graph analysis produces three output files:
-
-| File | Format | Content |
-|------|--------|---------|
-| `global_metrics_{method}.csv` | CSV | One row per sample, aggregate statistics |
-| `{sample}_vessel_metrics_{method}.h5` | HDF5 | One row per vessel segment |
-| `{sample}_junction_metrics_{method}.h5` | HDF5 | One row per node |
-
-#### Reading Output Files
-
-```python
-import pandas as pd
-
-# Global metrics
-global_df = pd.read_csv('global_metrics_thinning.csv')
-
-# Vessel metrics (requires: pip install tables)
-vessel_df = pd.read_hdf('sample_vessel_metrics_thinning.h5', key='df')
-
-# Junction metrics
-junction_df = pd.read_hdf('sample_junction_metrics_thinning.h5', key='df')
-```
-
-#### Full Pipeline Command
-
-```bash
-python -m vascumap.pipeline.graph_main \
-    --masks_dir_path /path/to/masks \
-    --file_suffix _vessel_mask \
-    --method thinning \
-    --save_local_metrics \
-    --graph_visualization
-```
-
-**Key function:** [`process_directory`](#process_directory)
-
----
-
-# 3. Function Reference
-
-This section documents all public functions organized by module. Each entry includes:
-- **Purpose**: What the function does
-- **Arguments**: Input parameters with types
-- **Returns**: Output values
-- **Source**: Link to source file
-
----
-
-## 3.1 Image Translation Module
-
-**Location:** [`vascumap/models/image_translation/`](vascumap/models/image_translation/)
-
-### `ImageDataset3D`
-
-PyTorch Dataset for paired 3D NIfTI volumes.
-
-**Source:** [`utils.py`](vascumap/models/image_translation/utils.py)
-
-```python
-dataset = ImageDataset3D(
-    input_paths: List[str],      # Paths to input volumes
-    target_paths: List[str],     # Paths to target volumes (optional)
-    split: str = 'train',        # 'train', 'val', or 'test'
-    transform: callable = None   # Custom TorchIO transform
+(
+    cropped_stack,           # np.ndarray (Z, Y, X)
+    device_width_um,         # float
+    pixel_size_um,           # dict {z_um, y_um, x_um}
+    z_votes,                 # dict {int: int}  per-plane vote counts
+    image_name,              # str
+    mask_central_region_enabled,  # bool
+    cropped_organoid_mask_xy,     # np.ndarray or None
 )
 ```
 
-**Returns:** `tuple(input_tensor, target_tensor)` or `input_tensor`
+## 3.5 `save_overlay_and_slice_tifs()`
+
+```python
+app.save_overlay_and_slice_tifs(
+    name_prefix: str,
+    run_suffix: int,
+    output_dir: Path | None = None,
+)
+```
+
+Saves a 2D RGB overlay TIFF showing the detected ROI boundaries drawn over the mean-projection of the last loaded image. Inner boundary = red, outer boundary = yellow.
+
+## 3.6 Helper Functions
+
+### `read_voxel_size_um`
+
+```python
+z_um, y_um, x_um = read_voxel_size_um(
+    source_path: Path | None,
+    source_is_lif: bool,
+    selected_lif: Path | None = None,
+    image_index: int | None = None,
+)
+```
+
+Reads voxel size metadata from LIF or TIFF files:
+- **LIF**: Uses `liffile.LifFile` → `LifImage.coords` (primary), then `asxarray().coords` (fallback). Returns `(z_um, y_um, x_um)` in micrometres.
+- **TIFF**: Uses `tifffile` XResolution/YResolution tags; tries IJMetadata or ImageDescription for z spacing.
+- Returns `(None, None, None)` on failure.
+
+### `um_to_xy_pixels`
+
+```python
+x_px, y_px = um_to_xy_pixels(width_um, x_um, y_um)
+```
+
+Converts a physical width in µm to pixel counts using voxel size metadata. Returns `None` if inputs are invalid.
 
 ---
+
+# 4. Model Inference
+
+**Source:** `models.py`
+
+## 4.1 Pix2Pix (3D GAN)
 
 ### `Generator`
 
-3D U-Net generator based on MONAI.
+3D U-Net using MONAI's `UNet`:
 
-**Source:** [`utils.py`](vascumap/models/image_translation/utils.py)
-
-```python
-generator = Generator(
-    dropout_p: float = 0.4    # Dropout probability
-)
 ```
-
-**Architecture:**
-- Channels: (32, 64, 128, 256, 512)
-- Strides: (1, 2, 2, 2, 1)
-- Residual units: 3 per level
-
----
+Channels: (32, 64, 128, 256, 512)
+Strides:  (1, 2, 2, 2, 1)
+Residual units: 3 per level
+Dropout: configurable (default 0.4)
+Activation: ReLU on output
+```
 
 ### `Discriminator`
 
-3D PatchGAN discriminator.
-
-**Source:** [`utils.py`](vascumap/models/image_translation/utils.py)
-
-```python
-discriminator = Discriminator(
-    dropout_p: float = 0.4    # Dropout probability
-)
-```
-
-**Input:** Concatenated input+target (2 channels)
-
----
+3D PatchGAN with 5 Conv3d layers. Input is the brightfield + fake/real fluorescence concatenated (2 channels). Output is a patch-level real/fake score.
 
 ### `Pix2Pix`
 
-PyTorch Lightning module for GAN training.
-
-**Source:** [`utils.py`](vascumap/models/image_translation/utils.py)
-
-```python
-model = Pix2Pix(
-    generator_dropout_p: float = 0.4,
-    discriminator_dropout_p: float = 0.4,
-    generator_lr: float = 1e-3,
-    discriminator_lr: float = 1e-6,
-    weight_decay: float = 1e-5,
-    lr_scheduler_T_0: float = 5e3,
-    lr_scheduler_T_mult: float = 2
-)
-```
+PyTorch Lightning module wrapping Generator and Discriminator.
 
 **Loss functions:**
-- Generator: `BCE + λ×L1 + λ×MSE` (λ=100)
-- Discriminator: `BCE`
+- **Generator**: `BCE(fake_label, ones) + λ·L1(pred, target) + λ·MSE(pred, target)` with λ=100
+- **Discriminator**: `BCE(real_label, ones) + BCE(fake_label, zeros)`
 
----
+**Optimisation:** Adam for both; CosineAnnealingWarmRestarts scheduler.
 
-## 3.2 Segmentation Module
+**Checkpoints:** Loaded by passing `model_path` to the constructor. The checkpoint `state_dict` is loaded with `strict=True`.
 
-**Location:** [`vascumap/models/segmentation/`](vascumap/models/segmentation/)
-
-### `SegmentationModule`
-
-PyTorch Lightning module for 2D segmentation.
-
-**Source:** [`model.py`](vascumap/models/segmentation/model.py)
+### `Pix2Pix.predict()`
 
 ```python
-model = SegmentationModule(
-    model_name: str,             # 'Unet', 'FPN', 'DeepLabV3+', etc.
-    encoder_name: str,           # 'mit_b5', 'resnet50', etc.
-    in_channels: int,            # Usually 1 for grayscale
-    encoder_weights: str = 'imagenet',
-    learning_rate: float = 1e-3,
-    max_epochs: int = 200        # For scheduler calculation
+vessel_pred = model_p2p.predict(
+    stack_bf: np.ndarray,   # (Z, Y, X) normalised to [0, 1]
+    device: str,            # 'cuda' or 'cpu'
+    n_iter: int = 1         # Monte Carlo averaging passes
 )
 ```
 
-**Training config:**
-- Loss: Dice + BCE
-- Optimizer: RAdam (weight_decay=1e-4)
-- Scheduler: StepLR (halves at max_epochs/2)
+Uses MONAI `SlidingWindowInferer` (ROI 32×512×512, overlap 0.75/0.25/0.25). Returns `np.ndarray` (Z, Y, X) clipped to [0, 1].
 
----
+## 4.2 Segmentation Model
 
-### `build_model`
-
-Factory function for segmentation models.
-
-**Source:** [`model_utils.py`](vascumap/models/segmentation/model_utils.py)
-
-```python
-model = build_model(
-    model_str: str,              # Architecture name
-    encoder_str: str,            # Encoder backbone
-    in_channels: int = 1,
-    encoder_weights: str = None  # 'imagenet' or None
-)
-```
-
-**Supported architectures:**
-`Unet`, `Unet++`, `MAnet`, `Linknet`, `FPN`, `PSPNet`, `PAN`, `DeepLabV3`, `DeepLabV3+`
-
-**Returns:** `torch.nn.Module`
-
----
-
-### `adapt_input_model`
-
-Adapts pretrained RGB weights for grayscale input.
-
-**Source:** [`model_utils.py`](vascumap/models/segmentation/model_utils.py)
-
-```python
-model = adapt_input_model(
-    model: nn.Module    # Model with 3-channel first layer
-)
-```
-
-**Returns:** `nn.Module` with 1-channel first layer
-
----
-
-### `load_data`
-
-Create train/val data loaders.
-
-**Source:** [`dataset.py`](vascumap/models/segmentation/dataset.py)
-
-```python
-loaders = load_data(
-    images_path_str: str,        # Directory of images
-    masks_path_str: str = None,  # Directory of masks (None for inference)
-    batch_size: int = 16,
-    seed: int = 0,
-    test_size: float = 0.1,
-    format: str = 'tif'
-)
-```
-
-**Returns:** `OrderedDict` with 'train' and 'valid' DataLoaders
-
----
-
-### `SegmentationDataset`
-
-PyTorch Dataset for 2D image-mask pairs.
-
-**Source:** [`dataset.py`](vascumap/models/segmentation/dataset.py)
-
-```python
-dataset = SegmentationDataset(
-    images: List[Path],          # Image file paths
-    masks: List[Path] = None,    # Mask file paths
-    transforms: callable = None  # Albumentations composition
-)
-```
-
-**Returns:** `dict` with 'image', 'mask', 'filename'
-
----
-
-## 3.3 Pipeline Module
-
-**Location:** [`vascumap/pipeline/`](vascumap/pipeline/)
-
-### Data Loading
-
-#### `get_stack_from_lif`
-
-Extract and rescale 3D stack from LIF file.
-
-**Source:** [`data.py`](vascumap/pipeline/data.py)
-
-```python
-stack, voxel_size, [nz, ny, nx] = get_stack_from_lif(
-    lif_file: str,                       # Path to LIF file
-    stack_index: int = 0,                # Image index in LIF
-    ref_voxel_size: list = [5, 2, 2]     # Target voxel size [Z, Y, X] µm
-)
-```
-
-**Returns:**
-- `stack`: `np.ndarray` (Z, Y, X, C)
-- `voxel_size`: `np.ndarray` [Z, Y, X] original
-- `[nz, ny, nx]`: Original dimensions
-
----
-
-### Preprocessing
-
-#### `auto_focus`
-
-Find optimal focal plane across XY.
-
-**Source:** [`preprocessing.py`](vascumap/pipeline/preprocessing.py)
-
-```python
-focus, grid = auto_focus(
-    stack_bf: np.ndarray,        # 3D stack (Z, Y, X)
-    crop_window: int = 50,       # Border margin
-    n_sampling: int = 20,        # Grid density
-    window_size: int = 50,       # Focus patch size
-    viz: bool = False            # Show visualization
-)
-```
-
-**Returns:**
-- `focus`: 2D focused image (Y, X)
-- `grid`: Height map of Z-indices (Y, X)
-
----
-
-#### `crop_stack`
-
-Complete cropping pipeline.
-
-**Source:** [`preprocessing.py`](vascumap/pipeline/preprocessing.py)
-
-```python
-cropped = crop_stack(
-    stack: np.ndarray,           # Input (Z, Y, X, C)
-    crop_profile: str,           # Profile name
-    bf_index: int,               # Brightfield channel
-    mode: str = '3D',            # '2D' or '3D'
-    z_range: float = 200,        # Z-thickness in µm
-    ref_voxel_size: list = [5, 2, 2],
-    lif_path_root: str = None,   # Save debug images here
-    filename: str = None
-)
-```
-
-**Returns:** `np.ndarray` cropped stack
-
----
-
-#### `crop_stack_z`
-
-Crop Z-range around focal surface.
-
-**Source:** [`preprocessing.py`](vascumap/pipeline/preprocessing.py)
-
-```python
-cropped = crop_stack_z(
-    stack: np.ndarray,           # Full stack
-    grid: np.ndarray,            # Height map from auto_focus
-    z_range: float,              # Thickness in µm
-    ref_voxel_size: tuple        # Voxel size [Z, Y, X]
-)
-```
-
-**Returns:** `np.ndarray` Z-cropped stack
-
----
-
-#### `apply_affine_crop_simple`
-
-Warp quadrilateral ROI to rectangle.
-
-**Source:** [`preprocessing.py`](vascumap/pipeline/preprocessing.py)
-
-```python
-warped = apply_affine_crop_simple(
-    image: np.ndarray,           # 3D (Z,Y,X,C) or 2D (Y,X,C)
-    registered_rect: np.ndarray, # 4×2 corners (y, x)
-    order: int = 1               # Interpolation order
-)
-```
-
-**Returns:** `np.ndarray` warped image
-
----
-
-#### `transform_coords`
-
-Apply affine transformation to coordinates.
-
-**Source:** [`preprocessing.py`](vascumap/pipeline/preprocessing.py)
-
-```python
-transformed = transform_coords(
-    coords: np.ndarray,          # (N, 2) coordinates
-    params: list                 # [scale, theta, tx, ty]
-)
-```
-
-**Returns:** `np.ndarray` transformed coordinates
-
----
-
-#### `register_high_level`
-
-High-level registration wrapper.
-
-**Source:** [`preprocessing.py`](vascumap/pipeline/preprocessing.py)
-
-```python
-registered_coords, optimal_params, best_score = register_high_level(
-    edges: np.ndarray,           # Edge map
-    neck_coords_all: np.ndarray  # Template coordinates
-)
-```
-
-**Returns:** `tuple` (transformed_coords, params, score)
-
----
-
-### Prediction
-
-#### `load_pix2pix`
-
-Load trained Pix2Pix model.
-
-**Source:** [`prediction.py`](vascumap/pipeline/prediction.py)
-
-```python
-model = load_pix2pix(
-    model_path: str,             # Checkpoint path
-    device: str = 'cuda'
-)
-```
-
-**Returns:** `Pix2Pix` in eval mode
-
----
-
-#### `load_segmentation_model`
-
-Load trained segmentation model.
-
-**Source:** [`prediction.py`](vascumap/pipeline/prediction.py)
+### `load_segmentation_model()`
 
 ```python
 model = load_segmentation_model(
-    model_path: str,             # Checkpoint path (.pth or .ckpt)
+    model_path: str,       # .pth or .ckpt file
     device: str = 'cuda'
 )
 ```
 
-**Returns:** `nn.Module` in eval mode
+Loads a `smp.Unet` with `mit_b5` encoder, then calls `adapt_input_model` to convert the first layer from 3-channel to 1-channel (grayscale). Supports both raw state dicts and PyTorch Lightning checkpoints (strips `model.` prefix if present). Returns the model in eval mode.
 
----
-
-#### `predict_pix2pix`
-
-Run translation inference with sliding window.
-
-**Source:** [`prediction.py`](vascumap/pipeline/prediction.py)
+### `adapt_input_model()`
 
 ```python
-prediction = predict_pix2pix(
-    model_p2p: nn.Module,
-    stack_bf: np.ndarray,        # (Z, Y, X) brightfield
-    device: str,
-    n_iter: int = 1              # Monte Carlo averaging
-)
+model = adapt_input_model(model)
 ```
 
-**Returns:** `np.ndarray` pseudo-fluorescence (Z, Y, X)
+Converts `encoder.patch_embed1.proj` from a 3-channel Conv2d to 1-channel by summing the RGB weight channels (TIMM-style adaptation).
 
----
-
-#### `predict_mask`
-
-Run 2D segmentation (axial slices only).
-
-**Source:** [`prediction.py`](vascumap/pipeline/prediction.py)
+### `predict_mask_ortho()`
 
 ```python
-proba = predict_mask(
-    model_smp: nn.Module,
-    vessel_pred: np.ndarray,     # (Z, Y, X)
+vessel_proba = predict_mask_ortho(
+    model_smp,
+    vessel_pred_iso: np.ndarray,   # (Z, Y, X)
     device: str
 )
 ```
 
-**Returns:** `np.ndarray` probability map (Z, Y, X)
+Runs sigmoid-activated 2D U-Net inference in three orientations:
+- **Axial** (z plane): `SliceInferer` with `roi_size=(1024, 1024)`, Gaussian mode, overlap 0.5
+- **Coronal** (y plane): `SliceInferer` with `roi_size=(256, 256)`, `spatial_dim=1`
+- **Sagittal** (x plane): `SliceInferer` with `roi_size=(256, 256)`, `spatial_dim=2`
+
+If the z dimension is < 256, pads with -1 before coronal/sagittal inference and crops back afterward.
+
+Returns the mean of the three probability volumes.
+
+### `process_vessel_mask()`
+
+```python
+mask = process_vessel_mask(vessel_proba, ortho=False)
+```
+
+- `ortho=True`: applies `median_filter_3d_gpu` (size=7, chunk 32×1024×1024) then hysteresis threshold (low=0.2, high=0.5)
+- `ortho=False`: hysteresis threshold only (low=0.1, high=0.5)
+
+### `median_filter_3d_gpu()`
+
+```python
+filtered = median_filter_3d_gpu(volume, size=3, chunk_size=(64, 64, 64))
+```
+
+Applies `cupyx.scipy.ndimage.median_filter` via `cupy_chunk_processing`.
 
 ---
 
-#### `predict_mask_ortho`
+# 5. Skeletonisation and Analysis
 
-Run 2.5D segmentation (3-plane averaging).
+**Source:** `skeletonisation.py`
 
-**Source:** [`prediction.py`](vascumap/pipeline/prediction.py)
+## 5.1 `clean_and_analyse()`
+
+Main entry point. Runs the complete skeletonisation and metric computation pipeline.
 
 ```python
-proba = predict_mask_ortho(
-    model_smp: nn.Module,
-    vessel_pred_iso: np.ndarray, # Isotropic volume
-    device: str
+results = clean_and_analyse(
+    vasculature_segmentation: np.ndarray,   # 3D binary mask (Z, Y, X)
+    voxel_size_um=(2.0, 2.0, 2.0),
+    junction_distance_mode='skeleton',       # 'skeleton' or 'euclidean'
+    exclusion_mask_xy=None,                  # 2D bool mask for organoid region
 )
 ```
 
-**Returns:** `np.ndarray` averaged probability map
+Returns a dict with keys:
+
+| Key | Description |
+|-----|-------------|
+| `global_metrics` | dict of all scalar metrics |
+| `global_metrics_df` | single-row DataFrame |
+| `clean_segmentation` | float32 binary volume after smoothing+hole-filling |
+| `binary_edt` | 3D Euclidean distance transform (µm) |
+| `skeleton` | bool 3D skeleton from `skimage.morphology.skeletonize` |
+| `graph` | raw `sknw` NetworkX graph |
+| `area_image` | float64 cross-sectional area volume |
+| `pruned_graph` | graph after `prune_graph` |
+| `clean_graph` | graph after `remove_mid_node` + border/exclusion trimming |
+| `skeleton_from_graph` | uint8 skeleton derived from `clean_graph` edges |
+
+**Processing steps:**
+1. Subtract exclusion mask from segmentation (if provided).
+2. GPU Gaussian smooth (σ=3) + threshold at 0.5 → `clean_segmentation`.
+3. GPU binary fill holes.
+4. GPU EDT (returns µm distances with `sampling=voxel_size_um`).
+5. Dask-parallel `skeletonize_3d` with depth=(2,2,2) overlap.
+6. `sknw.build_sknw` to build graph.
+7. `compute_cross_sectional_areas` at skeleton points.
+8. Prune, clean, trim border/exclusion edges.
+9. Compute all metrics.
+
+## 5.2 Graph Helper Functions
+
+### `prune_graph(graph, area_3d, edt_cutoff=0.20, length_cutoff=25)`
+
+Iteratively removes terminal branches. A branch from endpoint `e` to junction `j` is removed if:
+- `length ≤ length_cutoff`, OR
+- `mean_edt(tip_20_percent) / edt(junction_point) > edt_cutoff`
+
+This eliminates thin noise stubs while keeping meaningful sprouts.
+
+### `remove_mid_node(graph)`
+
+Iteratively removes degree-2 nodes by merging their two incident edges into one. Edge point coordinates are concatenated in the correct orientation (using pairwise distance checks).
+
+### `collect_border_vicinity_edges(graph, image_shape, vicinity_xy=50)`
+
+Removes edges where any point lies within `vicinity_xy` pixels of the XY image boundary. Isolated nodes are removed afterwards.
+
+### `collect_exclusion_zone_edges(graph, exclusion_mask_xy)`
+
+Removes edges where any point `(y, x)` falls in the exclusion mask. Used to eliminate vessels from the organoid region.
+
+## 5.3 Metric Functions
+
+### `compute_cross_sectional_areas(mask, skeleton, binary_edt, voxel_size_um)`
+
+At each skeleton voxel `(z, y, x)`:
+- `r_major = EDT_2D(y, x)` — 2D distance to vessel wall in the XY max projection
+- `r_minor = EDT_3D(z, y, x)` — 3D distance to vessel wall
+- `area = π × r_major × r_minor`
+
+Returns a 3D array with areas only at skeleton locations.
+
+### `summarize_network_headline_metrics(graph, area_image, ...)`
+
+Computes per-edge and per-node statistics:
+- Tortuosity = `path_length / straight_line_distance` (clipped to [0, 5])
+- Median cross-sectional area per edge
+- Junction-to-junction distances (Dijkstra path lengths over the graph, or Euclidean)
+- Endpoint-to-endpoint distances
+
+### `compute_internal_pore_headline_metrics(mask, ...)`
+
+Per-slice pore detection:
+1. Fill holes in each z-slice: `filled_slice = binary_fill_holes(vessel_slice)`
+2. `pores = filled_slice & ~vessel_slice`
+3. Label connected components; filter by `min_pore_area_um2` and `max_pore_area_fraction_of_slice`
+4. GPU EDT for inscribed radius
+
+Returns counts, area fractions, and inscribed radius distributions.
+
+### `fractal_dimension_and_lacunarity(binary, ...)`
+
+Box-counting method over log-spaced scales from `2^max` down to 1:
+- `D = slope(log N vs log 1/ε)` where N = non-empty boxes
+- `λ = mean(Var(counts)/Mean(counts)²)` over all scales
 
 ---
 
-### Main Pipeline
+# 6. Utilities
 
-#### `run`
+**Source:** `utils.py`
 
-Run full inference pipeline.
+## `scale(arr)`
 
-**Source:** [`main.py`](vascumap/pipeline/main.py)
+Min-max normalises `arr` to [0, 1]. Operates on float32.
+
+## `resize_dask(stack, rescale_factor)`
+
+Rescales a 3D numpy array using Dask + `skimage.transform.resize` (cubic interpolation). Processes in chunks to avoid loading the entire array into memory at once.
 
 ```python
-run(
-    lif_dir_path: str,           # Directory with .lif files
-    ortho: bool = True,          # Use 2.5D inference
-    bf_index: int = None,        # Brightfield channel (auto-detect if None)
-    fluo_index: int = None,      # Fluorescence channel (skip translation if set)
-    crop_profile: str = 'dorota',
-    z_range: int = 200,
-    save_all_stacks: bool = False,
-    crop: bool = True,
-    model_p2p_path: str = None,
-    model_smp_path: str = None
-)
+rescaled = resize_dask(stack, [z_factor, y_factor, x_factor])
 ```
+
+## `cupy_chunk_processing(volume, processing_func, chunk_size, overlap, **kwargs)`
+
+Applies any CuPy-compatible function to a 3D volume in overlapping GPU chunks:
+
+1. Iterates over (z, y, x) chunk positions.
+2. Copies chunk + overlap halo to GPU.
+3. Calls `processing_func(chunk_gpu, **kwargs)`.
+4. Writes back only the non-overlapping core region to the CPU result array.
+5. Frees GPU memory after each chunk.
+
+Used for Gaussian filtering, hole filling, EDT, and median filtering throughout the pipeline.
 
 ---
 
-## 3.4 Graph Analysis Module
-
-### Skeletonization
-
-#### `skeletonize_3d_parallel`
-
-Parallel thinning using Dask.
-
-**Source:** [`skeletonization.py`](vascumap/pipeline/skeletonization.py)
-
-```python
-skeleton = skeletonize_3d_parallel(
-    binary_volume: np.ndarray,
-    chunk_size: tuple = (128, 128, 128),
-    iter: int = 1
-)
-```
-
-**Returns:** `np.ndarray` skeleton image
-
----
-
-#### `prune_graph`
-
-Remove spurious branches.
-
-**Source:** [`skeletonization.py`](vascumap/pipeline/skeletonization.py)
-
-```python
-pruned = prune_graph(
-    graph: nx.Graph,
-    area_3d: np.ndarray,         # Cross-sectional areas
-    edt_cutoff: float = 0.25,    # EDT ratio threshold
-    length_cutoff: int = 25      # Minimum branch length
-)
-```
-
-**Returns:** `nx.Graph` pruned
-
----
-
-#### `finalize_graph`
-
-Clean graph: merge degree-2 nodes, clip coordinates.
-
-**Source:** [`skeletonization.py`](vascumap/pipeline/skeletonization.py)
-
-```python
-final = finalize_graph(
-    G_repositioned: nx.Graph,
-    binary_edt: np.ndarray
-)
-```
-
-**Returns:** `nx.Graph` cleaned
-
----
-
-#### `collect_border_vicinity_edges`
-
-Remove edges near image borders.
-
-**Source:** [`skeletonization.py`](vascumap/pipeline/skeletonization.py)
-
-```python
-trimmed = collect_border_vicinity_edges(
-    graph: nx.Graph,
-    image_shape: tuple,
-    vicinity_z: int = 1,
-    vicinity_xy: int = 50
-)
-```
-
-**Returns:** `nx.Graph` with border edges removed
-
----
-
-#### `measure_edge_length`
-
-Compute path length of edge coordinates.
-
-**Source:** [`skeletonization.py`](vascumap/pipeline/skeletonization.py)
-
-```python
-length = measure_edge_length(
-    coordinates: np.ndarray      # (N, 3) points
-)
-```
-
-**Returns:** `float` total path length
-
----
-
-### Mesh Contraction
-
-#### `create_graph_contraction`
-
-Full mesh contraction pipeline.
-
-**Source:** [`mesh_contraction.py`](vascumap/pipeline/mesh_contraction.py)
-
-```python
-graph, mesh, simple_mesh, contracted = create_graph_contraction(
-    binary_edt: np.ndarray,
-    time_lim: int = 300          # Seconds
-)
-```
-
-**Returns:** `tuple` (graph, original_mesh, simplified_mesh, contracted_mesh)
-
----
-
-#### `contract_gpu`
-
-GPU-accelerated Laplacian mesh contraction.
-
-**Source:** [`mesh_contraction.py`](vascumap/pipeline/mesh_contraction.py)
-
-```python
-contracted = contract_gpu(
-    mesh: trimesh.Trimesh,
-    epsilon: float = 1e-6,       # Convergence threshold
-    iter_lim: int = 100,
-    time_lim: int = None,        # Seconds
-    SL: float = 2,               # Contraction weight multiplier
-    WH0: float = 1,              # Initial attraction weight
-    operator: str = 'cotangent' # 'cotangent' or 'umbrella'
-)
-```
-
-**Returns:** `trimesh.Trimesh` contracted
-
----
-
-#### `reposition_graph_edges`
-
-Move nodes toward vessel centerline using EDT gradient.
-
-**Source:** [`mesh_contraction.py`](vascumap/pipeline/mesh_contraction.py)
-
-```python
-repositioned = reposition_graph_edges(
-    graph: nx.Graph,
-    binary_edt: np.ndarray,
-    min_segment_length: float = 5.0,
-    max_disp: float = 12.5,
-    step_size: float = 1.0,
-    num_iterations: int = 1000
-)
-```
-
-**Returns:** `nx.Graph` repositioned
-
----
-
-### Metrics
-
-#### `compute_cross_sectional_areas`
-
-Compute vessel area at skeleton points.
-
-**Source:** [`metrics.py`](vascumap/pipeline/metrics.py)
-
-```python
-area_3d = compute_cross_sectional_areas(
-    mask: np.ndarray,            # Binary mask
-    skeleton_image: np.ndarray,  # Skeleton
-    binary_edt: np.ndarray       # EDT
-)
-```
-
-**Formula:** `Area = π × EDT_2D(y,x) × EDT_3D(z,y,x)`
-
-**Returns:** `np.ndarray` with areas at skeleton points
-
----
-
-#### `compute_vessel_metrics`
-
-Compute per-edge metrics.
-
-**Source:** [`metrics.py`](vascumap/pipeline/metrics.py)
-
-```python
-vessel_df = compute_vessel_metrics(
-    graph: nx.Graph,
-    area_image: np.ndarray,
-    vessel_metrics_df: pd.DataFrame
-)
-```
-
-**Returns:** `pd.DataFrame` with columns: `z, y, x, volume, length, shortest_path, tortuosity, is_sprout, mean_cs_area, median_cs_area, std_cs_area, node1_degree, node2_degree, orientation_z, orientation_y, orientation_x`
-
----
-
-#### `compute_junction_metrics`
-
-Compute per-node metrics.
-
-**Source:** [`metrics.py`](vascumap/pipeline/metrics.py)
-
-```python
-junction_df = compute_junction_metrics(
-    graph: nx.Graph,
-    junction_metrics_df: pd.DataFrame,
-    distance_threshold: int = 50
-)
-```
-
-**Returns:** `pd.DataFrame` with columns: `z, y, x, number_of_vessel_per_node, is_sprout_tip, is_junction, dist_nearest_junction, dist_nearest_endpoint, num_junction_neighbors, num_endpoint_neighbors`
-
----
-
-#### `fractal_dimension_and_lacunarity`
-
-Box-counting fractal analysis.
-
-**Source:** [`metrics.py`](vascumap/pipeline/metrics.py)
-
-```python
-fd, lacunarity = fractal_dimension_and_lacunarity(
-    array: np.ndarray,           # Binary
-    max_box_size: int = None,    # Auto from image
-    min_box_size: int = 1,
-    n_samples: int = 20
-)
-```
-
-**Returns:** `tuple` (fractal_dimension, lacunarity)
-
----
-
-#### `convex_hull_volume`
-
-Compute convex hull volume.
-
-**Source:** [`metrics.py`](vascumap/pipeline/metrics.py)
-
-```python
-volume = convex_hull_volume(
-    binary_image: np.ndarray
-)
-```
-
-**Returns:** `float` hull volume in voxels³
-
----
-
-### Main Graph Pipeline
-
-#### `process_directory`
-
-Process all masks in a directory.
-
-**Source:** [`graph_main.py`](vascumap/pipeline/graph_main.py)
-
-```python
-process_directory(
-    masks_dir_path: str,
-    suffix: str,                 # e.g., '_vessel_mask'
-    save_local_metrics: bool,
-    visualization: bool = True,
-    skel_method: str = "thinning",
-    contraction_timelim: int = 300
-)
-```
-
----
-
-#### `construct_vessel_network`
-
-Build graph from binary mask.
-
-**Source:** [`graph_main.py`](vascumap/pipeline/graph_main.py)
-
-```python
-graph, area_image = construct_vessel_network(
-    binary_image: np.ndarray,
-    global_metrics_df: pd.DataFrame,
-    skel_method: str = "auto",
-    contraction_timelim: int = 300
-)
-```
-
-**Returns:** `tuple` (NetworkX graph, area volume)
-
----
-
-#### `calculate_graph_metrics`
-
-Compute all metrics from graph.
-
-**Source:** [`graph_main.py`](vascumap/pipeline/graph_main.py)
-
-```python
-global_df, junction_df, vessel_df = calculate_graph_metrics(
-    graph: nx.Graph,
-    sample_name: str,
-    area_image: np.ndarray,
-    global_metrics_df: pd.DataFrame
-)
-```
-
-**Returns:** `tuple` of DataFrames
-
----
-
-## 3.5 Utilities
-
-**Location:** [`vascumap/pipeline/utils.py`](vascumap/pipeline/utils.py)
-
-### `contrast`
-
-Percentile contrast adjustment.
-
-```python
-adjusted = contrast(
-    arr: np.ndarray,
-    low: float,                  # Lower percentile (0-100)
-    high: float                  # Upper percentile (0-100)
-)
-```
-
-**Returns:** `np.ndarray` clipped to percentile range
-
----
-
-### `scale`
-
-Min-max normalization to [0, 1].
-
-```python
-scaled = scale(
-    arr: np.ndarray
-)
-```
-
-**Returns:** `np.ndarray` in [0, 1]
-
----
-
-### `resize_dask`
-
-Dask-based 3D rescaling.
-
-```python
-resized = resize_dask(
-    stack: np.ndarray,
-    rescale_factor: list         # [z, y, x] factors
-)
-```
-
-**Returns:** `np.ndarray` resized
-
----
-
-### `cupy_chunk_processing`
-
-Apply GPU function to volume in chunks.
-
-```python
-result = cupy_chunk_processing(
-    volume: np.ndarray,
-    processing_func: callable,
-    chunk_size: tuple = (64, 512, 512),
-    overlap: tuple = (15, 15, 15),
-    **kwargs                     # Passed to processing_func
-)
-```
-
-**Returns:** `np.ndarray` processed
-
----
-
-### `median_filter_3d_gpu`
-
-GPU-accelerated 3D median filter.
-
-```python
-filtered = median_filter_3d_gpu(
-    volume: np.ndarray,
-    size: int = 3,
-    chunk_size: tuple = (64, 64, 64)
-)
-```
-
-**Returns:** `np.ndarray` filtered
-
----
-
-### `process_vessel_mask`
-
-Convert probability map to binary mask.
-
-```python
-mask = process_vessel_mask(
-    vessel_proba: np.ndarray,    # Probabilities [0, 1]
-    ortho: bool = False          # Apply extra filtering
-)
-```
-
-**Processing:**
-- If `ortho=True`: median filter (size=7) + threshold (0.2, 0.5)
-- If `ortho=False`: threshold (0.1, 0.5)
-
-**Returns:** `np.ndarray` binary mask
-
----
-
-### `remove_false_positives`
-
-Remove artifacts using Gaussian fitting.
-
-```python
-remove_false_positives(
-    mask_p: str                  # Path to mask file
-)
-```
-
-Modifies file in-place, saves backup as `*_backup.tif`.
-
----
-
-# 4. Metrics Reference
-
-## 4.1 Global Metrics (CSV)
-
-Stored in `global_metrics_{method}.csv`, one row per sample.
-
-### Volume & Coverage
-
-| Column | Unit | Description | Formula |
-|--------|------|-------------|---------|
-| `sample` | - | Sample identifier | - |
-| `explant_volume` | voxels³ | Convex hull volume | `ConvexHull(foreground).volume` |
-| `image_volume` | voxels³ | Total image volume | `Z × Y × X` |
-| `total_vessel_volume` | voxels³ | Foreground voxels | `sum(mask)` |
-| `vessel_coverage_explant` | ratio | Vessel/explant | `vessel_volume / explant_volume` |
-| `vessel_coverage_image` | ratio | Vessel/image | `vessel_volume / image_volume` |
-| `skeletonization_method` | - | 'thinning' or 'contraction' | - |
+# 7. Output Files and Metrics
+
+## 7.1 Output Files
+
+`VascuMap.pipeline()` creates the following files in `output_dir`:
+
+| File | Description |
+|------|-------------|
+| `{name}_overlay_geometry_0.tif` | RGB overlay showing inner (red) and outer (yellow) ROI boundaries |
+| `{name}_cropped_stack_aligned.npy` | Brightfield at 2 µm isotropic (post-preprocess + z/XY trim) |
+| `{name}_vessel_translation_aligned.npy` | Pix2Pix pseudo-fluorescence volume |
+| `{name}_clean_segmentation.npy` | Smoothed + hole-filled binary vessel mask |
+| `{name}_skeleton.npy` | 1-voxel skeleton from clean graph edges (uint8) |
+| `{name}_analysis_metrics.csv` | One-row global metrics DataFrame |
+| `{name}_organoid_mask.npy` | XY exclusion mask (uint8, only if organoid masking used) |
+
+With `save_all_interim=True`:
+
+| File | Description |
+|------|-------------|
+| `{name}_holes.npy` | Binary internal pore map (uint8) |
+| `{name}_hole_labels_per_slice.npy` | Per-slice integer pore labels |
+| `{name}_hole_distance_per_slice_um.npy` | Per-slice pore EDT in µm (float32) |
+| `{name}_full_graph_skeleton.npy` | Skeleton from raw (pre-prune) graph (int32) |
+| `{name}_vessel_mask.npy` | Raw binary vessel mask before cleaning |
+| `{name}_graph_nodes.npz` | `pts` (N×3 coordinates) and `is_sprout` (N bool) arrays |
+| `{name}_clean_graph.pkl` | Serialised NetworkX clean graph |
+
+## 7.2 Global Metrics (analysis_metrics.csv)
+
+All lengths and areas are in µm or µm-derived units (voxel size = 2 µm isotropic).
+
+### Volume
+| Metric | Description |
+|--------|-------------|
+| `chip_volume_um3` | Total analysed chip volume (µm³), minus exclusion mask if used |
+| `vessel_volume_um3` | Clean segmentation voxel count × 8 µm³ |
+| `vessel_volume_fraction` | `vessel_volume_um3 / chip_volume_um3` |
 
 ### Network Topology
+| Metric | Description |
+|--------|-------------|
+| `total_vessel_length_um` | Cumulative clean graph edge length (µm) |
+| `vessel_length_per_chip_volume_um_inverse2` | Length density (µm²) |
+| `sprouts_per_vessel_length_um_inverse` | Sprout count / total length (µm¹) |
+| `junctions_per_vessel_length_um_inverse` | Junction count / total length (µm¹) |
+| `sprouts_per_chip_volume_um_inverse3` | Sprout count / chip volume (µm³) |
+| `junctions_per_chip_volume_um_inverse3` | Junction count / chip volume (µm³) |
 
-| Column | Unit | Description | Formula |
-|--------|------|-------------|---------|
-| `total_vessel_length` | voxels | Sum of edge lengths | `Σ length(edge)` |
-| `total_number_of_sprouts` | count | Edges with degree-1 endpoint | Vessels connected to tips |
-| `total_number_of_branches` | count | Edges between junctions | Both endpoints degree ≥ 2 |
-| `total_number_of_junctions` | count | Nodes with degree ≥ 2 | Branch points |
+### Complexity
+| Metric | Description |
+|--------|-------------|
+| `skeleton_fractal_dimension` | Box-counting fractal dimension of clean skeleton |
+| `skeleton_lacunarity` | Mean lacunarity across box scales |
 
-### Fractal Analysis
+### Vessel Morphology
+| Metric | Description |
+|--------|-------------|
+| `median_sprout_and_branch_tortuosity` | Median path/chord ratio across all edges |
+| `p90_minus_p10_sprout_and_branch_tortuosity` | P90−P10 spread |
+| `median_sprout_and_branch_median_cs_area_um2` | Median of per-edge median cross-sectional areas (µm²) |
+| `p90_minus_p10_sprout_and_branch_median_cs_area_um2` | P90−P10 spread |
 
-| Column | Unit | Description | Formula |
-|--------|------|-------------|---------|
-| `fractal_dimension` | - | Box-counting dimension | `slope(log(N) vs log(1/ε))` |
-| `lacunarity` | - | Heterogeneity measure | `mean(Var(H)/Mean(H)²)` |
+### Spatial Distances
+| Metric | Description |
+|--------|-------------|
+| `median_junction_dist_nearest_junction_um` | Median pairwise nearest-junction distance (µm), Dijkstra or Euclidean |
+| `p90_minus_p10_junction_dist_nearest_junction_um` | P90−P10 spread |
+| `median_sprout_dist_nearest_endpoint_um` | Median pairwise nearest-endpoint distance (µm) |
+| `p90_minus_p10_sprout_dist_nearest_endpoint_um` | P90−P10 spread |
 
-**Interpretation:**
-- Fractal dimension ≈ 1: Linear structure
-- Fractal dimension ≈ 2: Area-filling
-- Fractal dimension ≈ 3: Volume-filling
-- Typical vessels: 1.3 - 2.5
-
-### Aggregated Statistics
-
-Pattern: `{statistic}_{type}_{metric}`
-
-**Statistics:** `mean`, `std`, `median`  
-**Types:** `branch` (both ends junction), `sprout` (one end tip), `sprout_and_branch` (all)  
-**Vessel metrics:** `volume`, `length`, `shortest_path`, `tortuosity`
-
-**Junction types:** `junction` (degree ≥ 2), `sprout_tip` (degree = 1), `junction_and_sprout_tip` (all)  
-**Junction metrics:** `number_of_vessel_per_node`, `dist_nearest_junction`, `dist_nearest_endpoint`, `num_junction_neighbors`, `num_endpoint_neighbors`
-
----
-
-## 4.2 Vessel Metrics (HDF5)
-
-Stored in `{sample}_vessel_metrics_{method}.h5`, one row per edge.
-
-| Column | Type | Unit | Description | Formula |
-|--------|------|------|-------------|---------|
-| `z`, `y`, `x` | array | voxels | Coordinates along vessel | Path points |
-| `length` | float | voxels | Path length | `Σ ‖pᵢ₊₁ - pᵢ‖` |
-| `shortest_path` | float | voxels | Endpoint distance | `‖p_last - p_first‖` |
-| `tortuosity` | float | ratio | Curvature measure | `length / shortest_path` (clipped [0,5]) |
-| `volume` | float | voxels³ | Segment volume | `Σ area(pᵢ)` |
-| `mean_cs_area` | float | voxels² | Mean cross-section | `mean(π × r_3D × r_2D)` |
-| `median_cs_area` | float | voxels² | Median cross-section | `median(areas)` |
-| `std_cs_area` | float | voxels² | Area variability | `std(areas)` |
-| `is_sprout` | bool | - | Connected to endpoint | `degree(n1)=1 OR degree(n2)=1` |
-| `node1_degree` | int | count | First node degree | - |
-| `node2_degree` | int | count | Second node degree | - |
-| `orientation_z/y/x` | float | ratio | Direction vector | `(p_last - p_first) / ‖·‖` |
-| `sample` | str | - | Sample identifier | - |
-
-**Tortuosity interpretation:**
-- 1.0: Perfectly straight
-- \>1.5: Significantly curved
-- Clipped to [0, 5] for robustness
+### Internal Pores
+| Metric | Description |
+|--------|-------------|
+| `total_internal_pore_count` | Total pores across all z-slices |
+| `internal_pore_area_fraction_in_filled_vascular_area` | Pore area / filled vessel area |
+| `median_internal_pore_area_um2` | Median pore area (µm²) |
+| `p90_minus_p10_internal_pore_area_um2` | P90−P10 spread (µm²) |
+| `median_internal_pore_max_inscribed_radius_um` | Median max inscribed radius (µm) |
+| `p90_minus_p10_internal_pore_max_inscribed_radius_um` | P90−P10 spread |
+| `total_internal_pore_density_per_vessel_volume_um_inverse3` | Pore count / vessel volume (µm³) |
 
 ---
 
-## 4.3 Junction Metrics (HDF5)
+# 8. System Requirements and Installation
 
-Stored in `{sample}_junction_metrics_{method}.h5`, one row per node.
+## 8.1 Prerequisites
 
-| Column | Type | Unit | Description | Formula |
-|--------|------|------|-------------|---------|
-| `z`, `y`, `x` | float | voxels | Node position | - |
-| `number_of_vessel_per_node` | int | count | Node degree | Edges connected |
-| `is_sprout_tip` | bool | - | Is endpoint | `degree = 1` |
-| `is_junction` | bool | - | Is branch point | `degree ≥ 2` |
-| `dist_nearest_junction` | float | voxels | To closest junction | `min(‖pos - pos_j‖)` |
-| `dist_nearest_endpoint` | float | voxels | To closest endpoint | `min(‖pos - pos_e‖)` |
-| `num_junction_neighbors` | int | count | Junctions within threshold | Within 250 voxels |
-| `num_endpoint_neighbors` | int | count | Endpoints within threshold | Within 250 voxels |
-| `sample` | str | - | Sample identifier | - |
+| Component | Requirement |
+|-----------|-------------|
+| Python | 3.10+ |
+| GPU | CUDA-capable; ≥ 8 GB VRAM recommended |
+| CUDA Toolkit | 11.x or 12.x |
+| RAM | 16 GB minimum; 32 GB+ recommended |
 
-**Degree interpretation:**
-- Degree 1: Sprout tip (terminal)
-- Degree 3: Typical bifurcation
-- Degree ≥ 4: Complex junction
-
----
-
-## Unit Conversions
-
-All metrics are in **voxels**. To convert to physical units:
-
-```python
-iso_voxel_um = 2.0  # µm per voxel (after isotropic rescaling)
-
-# Length
-length_um = length_voxels * iso_voxel_um
-
-# Area
-area_um2 = area_voxels * (iso_voxel_um ** 2)
-
-# Volume
-volume_um3 = volume_voxels * (iso_voxel_um ** 3)
-```
-
----
-
-# 5. Appendix
-
-## 5.1 Mathematical Formulas
-
-### Cross-Sectional Area
-
-Modeled as ellipse at each skeleton point:
-
-```
-Area(p) = π × r_major × r_minor
-        = π × EDT_2D(y, x) × EDT_3D(z, y, x)
-
-where:
-  EDT_3D = distance to nearest boundary in 3D
-  EDT_2D = distance in XY max-projection
-```
-
-### Tortuosity
-
-```
-τ = L_path / L_straight
-  = Σ‖pᵢ₊₁ - pᵢ‖ / ‖p_last - p_first‖
-
-Interpretation:
-  τ = 1: Straight
-  τ > 1: Curved
-```
-
-### Fractal Dimension (Box-Counting)
-
-```
-D = lim(ε→0) [log N(ε) / log(1/ε)]
-
-Implementation:
-  scales = {2^k : k = 1..log₂(min_dim)}
-  N(ε) = count of non-empty boxes at scale ε
-  D = slope of linear fit: log(N) vs log(1/ε)
-```
-
-### Lacunarity
-
-```
-λ(ε) = Var(H) / Mean(H)²
-
-where H = histogram of points per box at scale ε
-
-Interpretation:
-  λ ≈ 0: Homogeneous
-  λ > 1: Heterogeneous/clustered
-```
-
----
-
-## 5.2 Troubleshooting
-
-### CUDA Out of Memory
-
-**Solution:** Reduce chunk sizes:
-```python
-cupy_chunk_processing(volume, func, chunk_size=(32, 256, 256))
-```
-
-### Empty Graph Output
-
-**Causes:** No foreground, over-pruning  
-**Solutions:**
-1. Check `np.sum(mask) > 0`
-2. Increase `edt_cutoff` (e.g., 0.5)
-3. Decrease `length_cutoff` (e.g., 10)
-
-### Mesh Contraction Timeout
-
-**Solutions:**
-1. Increase `time_lim` (e.g., 600)
-2. Use `skel_method='thinning'` for dense networks
-
-### NaN in Metrics
-
-| Metric | Cause | Solution |
-|--------|-------|----------|
-| `tortuosity` | `shortest_path ≈ 0` | Filter short segments |
-| `orientation_*` | Zero-length vector | Remove degenerate edges |
-| `fractal_dimension` | Empty skeleton | Check mask |
-| `dist_nearest_*` | No nodes of type | Expected for some samples |
-
----
-
-## 5.3 Contributing
-
-### Code Style
-
-- PEP 8 compliant
-- Google-style docstrings
-- Line length: 100 characters
+## 8.2 Installation
 
 ```bash
-# Format before committing
-black vascumap/
-isort vascumap/
+conda env create -f env_backup_base_20260309_172159.yml
+conda activate vascumap
 ```
 
-### Pull Request Process
+## 8.3 GPU Memory Notes
 
-1. Fork and create feature branch
-2. Make changes with clear commits
-3. Update documentation if needed
-4. Submit PR with description
+- The pipeline does not tile the Pix2Pix inference — the full stack is processed as a single sliding-window call. Very large stacks (> ~500 z-slices) may require additional chunking.
+- `cupy_chunk_processing` default chunk size is `(64, 512, 512)` with overlap `(15, 15, 15)`. Reduce `chunk_size` if CUDA OOM errors occur during skeletonisation.
+- GPU memory is explicitly freed (`torch.cuda.empty_cache()`, `cp.get_default_memory_pool().free_all_blocks()`) between major stages.
 
----
+## 8.4 Troubleshooting
 
-*Last updated: December 2024*
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| `CUDA out of memory` during model inference | Stack too large | Reduce z-span or XY size of input |
+| `CUDA out of memory` during skeletonisation | Chunk size too large | Pass smaller `chunk_size` to `cupy_chunk_processing` |
+| Empty/flat `analysis_metrics.csv` | No strong vote planes found | Check that device segmentation produced non-zero `z_votes` |
+| `ValueError: z_step_um must be positive` | Missing voxel metadata | Verify LIF/TIFF metadata; provide `pixel_size_um` manually if needed |
+| All metrics NaN | Empty clean graph (no vessels detected) | Inspect `clean_segmentation.npy`; check thresholds in `process_vessel_mask` |
+
