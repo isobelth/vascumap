@@ -447,6 +447,50 @@ def compute_internal_pore_headline_metrics(
     }
 
 
+def build_internal_pore_label_volumes(
+    mask,
+    voxel_size_um=(2.0, 2.0, 2.0),
+    max_pore_area_fraction_of_slice=0.15,
+):
+    """Build per-slice pore label and distance volumes for napari visualisation.
+
+    Returns:
+        (holes, hole_labels_per_slice, hole_distance_per_slice_um) as numpy arrays.
+    """
+    voxel_size_um = np.asarray(voxel_size_um, dtype=float)
+    holes = np.zeros_like(mask, dtype=np.uint8)
+    hole_labels_per_slice = np.zeros_like(mask, dtype=np.int32)
+    hole_distance_per_slice_um = np.zeros_like(mask, dtype=np.float32)
+
+    for z in range(mask.shape[0]):
+        vessel_slice = mask[z].astype(bool)
+        filled_slice = ndi.binary_fill_holes(vessel_slice)
+        internal_pores = filled_slice & ~vessel_slice
+
+        labeled, n_labels = ndi.label(internal_pores, structure=np.ones((3, 3), dtype=np.uint8))
+        if n_labels == 0:
+            continue
+
+        area_counts = np.bincount(labeled.ravel(), minlength=n_labels + 1).astype(np.float64)
+        max_pore_area_px = float(max_pore_area_fraction_of_slice) * float(vessel_slice.size)
+        valid_label_mask = (area_counts > 0) & (area_counts <= max_pore_area_px)
+        valid_label_mask[0] = False
+
+        filtered_pores_slice = valid_label_mask[labeled]
+        holes[z] = filtered_pores_slice.astype(np.uint8)
+
+        relabeled_slice, _ = ndi.label(filtered_pores_slice, structure=np.ones((3, 3), dtype=np.uint8))
+        hole_labels_per_slice[z] = relabeled_slice.astype(np.int32)
+
+        if np.any(filtered_pores_slice):
+            hole_distance_per_slice_um[z] = edt(
+                filtered_pores_slice,
+                sampling=tuple(voxel_size_um[1:]),
+            ).astype(np.float32)
+
+    return holes, hole_labels_per_slice, hole_distance_per_slice_um
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
