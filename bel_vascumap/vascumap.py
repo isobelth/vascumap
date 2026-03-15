@@ -13,6 +13,7 @@ from warnings import filterwarnings
 
 from models import Pix2Pix, load_segmentation_model, predict_mask_ortho, process_vessel_mask
 from utils import scale, resize_dask
+from skeletonisation import clean_and_analyse
 
 filterwarnings('ignore')
 
@@ -26,6 +27,7 @@ class VascuMap:
         image_index: int = 0,
         device_width_um: float = 35.0,
         mask_central_region: bool = False,
+        channel: int = 0,
     ) -> None:
         """Initialize the VascuMap workflow container.
 
@@ -56,6 +58,10 @@ class VascuMap:
         self.initial_z_range = None
         self._pre_z_start_global = None
         self._pre_z_um = None
+        self._z_start_final = None
+        self._z_stop_final = None
+        self._pixels_to_remove = None
+        self._exclusion_mask_xy_aligned = None
         
         if self.use_device_segmentation_app:
             self.app = DeviceSegmentationApp()
@@ -74,6 +80,7 @@ class VascuMap:
                 raise ValueError("image_source_path must exist and be a .tif/.tiff/.lif file.")
 
             self.app = DeviceSegmentationApp(enable_gui=False)
+            self.app.channel = int(channel)
             outputs = self.app.run_automatic(
                 image_source=src,
                 image_index=int(image_index),
@@ -122,6 +129,10 @@ class VascuMap:
         if not z_votes:
             z_votes = self.z_votes
         print(f"Initial z votes {self.z_votes}")
+
+        if z_votes is None or len(z_votes) == 0:
+            print("No z-vote data available – skipping preprocess.")
+            return None
 
         z_step = float(pixel_size_um["z_um"])
         if not np.isfinite(z_step) or z_step <= 0:
@@ -295,49 +306,164 @@ class VascuMap:
         if z_stop_final <= z_start_final:
             return
 
-        run_suffix =  int(np.random.randint(1, 10000))
-        name_prefix = self.image_name if self.image_name else "image"
-        np.save(f"{name_prefix}_vessel_proba_iso_{run_suffix}.npy", self.vessel_proba_iso)
-        np.save(f"{name_prefix}_vessel_pred_iso_{run_suffix}.npy", self.vessel_pred_iso)
-        np.save(f"{name_prefix}_vessel_mask_iso_{run_suffix}.npy", self.vessel_mask_iso)
-        np.save(f"{name_prefix}_cropped_stack_{run_suffix}.npy", self.cropped_stack)
         current_x_pixels = self.vessel_proba_iso.shape[1]
         current_y_pixels = self.vessel_proba_iso.shape[2]
-        pixels_to_remove = int(self.device_width_um/2)
+        pixels_to_remove = int(self.device_width_um)  # harsher cropping
+        self._z_start_final = z_start_final
+        self._z_stop_final = z_stop_final
+        self._pixels_to_remove = pixels_to_remove
         self.vessel_pred_iso = self.vessel_pred_iso[z_start_final:z_stop_final, pixels_to_remove:current_x_pixels-pixels_to_remove, pixels_to_remove:current_y_pixels-pixels_to_remove]
         self.vessel_proba_iso = self.vessel_proba_iso[z_start_final:z_stop_final, pixels_to_remove:current_x_pixels-pixels_to_remove, pixels_to_remove:current_y_pixels-pixels_to_remove]
         self.vessel_mask_iso = self.vessel_mask_iso[z_start_final:z_stop_final, pixels_to_remove:current_x_pixels-pixels_to_remove, pixels_to_remove:current_y_pixels-pixels_to_remove]
-        np.save(f"{name_prefix}_vessel_mask_iso_{run_suffix}_cropped.npy", self.vessel_mask_iso)        
-
-        if self.use_device_segmentation_app:
-            viewer = napari.Viewer()
-            viewer.add_image(self.vessel_proba_iso)
-            viewer.add_image(self.vessel_pred_iso)
-            viewer.add_labels(self.vessel_mask_iso)
-            napari.run()
         
         
     def skeletonisation_and_analysis(
-        self
+        self,
+        voxel_size_um=(2.0, 2.0, 2.0),
+        junction_distance_mode='skeleton',
     ) -> None:
         """
+        Run skeletonisation and vascular-network analysis on the final mask.
         """
+        if self.vessel_mask_iso is None:
+            print("No vessel_mask_iso available – skipping analysis.")
+            return
+
+        print("Running skeletonisation and analysis...")
+        # Build exclusion mask matched to vessel_mask_iso shape if organoid masking was used
+        exclusion_mask_xy = None
+        if self.mask_central_region_enabled and self.cropped_organoid_mask_xy is not None:
+            mask_xy = np.asarray(self.cropped_organoid_mask_xy, dtype=np.float32)
+            if mask_xy.ndim == 2 and mask_xy.size > 0:
+                target_h = int(self.vessel_mask_iso.shape[1])
+                target_w = int(self.vessel_mask_iso.shape[2])
+                src_h, src_w = int(mask_xy.shape[0]), int(mask_xy.shape[1])
+                if src_h > 0 and src_w > 0:
+                    # Resize to pre-trim resolution (same XY as model output)
+                    ptr = self._pixels_to_remove if self._pixels_to_remove is not None else int(self.device_width_um)
+                    pre_trim_h = target_h + 2 * ptr
+                    pre_trim_w = target_w + 2 * ptr
+                    scale_h = float(pre_trim_h) / float(src_h)
+                    scale_w = float(pre_trim_w) / float(src_w)
+                    resized = resize_dask(mask_xy[None, :, :], [1.0, scale_h, scale_w])[0]
+                    resized = np.asarray(resized > 0.5, dtype=bool)
+                    # Apply same device-width trim as postprocess
+                    resized = resized[ptr:ptr + target_h,
+                                      ptr:ptr + target_w]
+                    # Pad/clip to exact target shape
+                    if resized.shape[0] < target_h:
+                        resized = np.pad(resized, ((0, target_h - resized.shape[0]), (0, 0)),
+                                         mode="constant", constant_values=False)
+                    if resized.shape[1] < target_w:
+                        resized = np.pad(resized, ((0, 0), (0, target_w - resized.shape[1])),
+                                         mode="constant", constant_values=False)
+                    resized = resized[:target_h, :target_w]
+                    if np.any(resized):
+                        exclusion_mask_xy = resized
+                        print(f"Organoid exclusion mask applied: {int(np.count_nonzero(exclusion_mask_xy))} pixels excluded per z-slice")
+
+        self._exclusion_mask_xy_aligned = exclusion_mask_xy
+        self.analysis_results = clean_and_analyse(
+            self.vessel_mask_iso,
+            voxel_size_um=voxel_size_um,
+            junction_distance_mode=junction_distance_mode,
+            exclusion_mask_xy=exclusion_mask_xy,
+        )
+        print(self.analysis_results['global_metrics_df'].to_string(index=False))
         
     def pipeline(
         self,
+        output_dir: str | Path | None = None,
+        save_all_interim: bool = False,
     ) -> None:
-        """
-        """
+        """Run the full VascuMap pipeline and save outputs.
 
-        run_suffix = int(np.random.randint(1, 10000))
+        Args:
+            output_dir: Directory for all saved files. If ``None``, saves to cwd.
+            save_all_interim: When ``True``, also saves the extra volumes needed
+                for the full napari visualisation (holes, pore labels, pore
+                distances, full-graph skeleton, clean-graph skeleton, and graph
+                node coordinates).
+        """
         name_prefix = self.image_name if self.image_name else "image"
+        out = Path(output_dir) if output_dir is not None else Path.cwd()
+        out.mkdir(parents=True, exist_ok=True)
 
+        # ── 2-D device overlay ────────────────────────────────────────────
         if self.app is not None:
-            self.app.save_overlay_and_slice_tifs(name_prefix=name_prefix, run_suffix=run_suffix)
+            self.app.save_overlay_and_slice_tifs(
+                name_prefix=name_prefix, run_suffix=0, output_dir=out,
+            )
 
-        self.preprocess()
+        # ── Run pipeline stages ───────────────────────────────────────────
+        result = self.preprocess()
+        if result is None and self.cropped_stack is None:
+            print(f"  ⚠ Skipping {name_prefix}: no valid z-range / cropped stack.")
+            return
         self.model_inference(device="cuda")
         self.postprocess()
+        if self._z_start_final is None:
+            print(f"  ⚠ Skipping {name_prefix}: postprocess found no strong vote planes.")
+            return
+        self.skeletonisation_and_analysis()
+
+        # ── Aligned cropped stack (2 µm iso) ─────────────────────────────
+        z0, z1, ptr = self._z_start_final, self._z_stop_final, self._pixels_to_remove
+        if z0 is not None and z1 is not None and ptr is not None:
+            cropped_stack_iso = resize_dask(self.cropped_stack, [2.5, 1, 1])
+            H, W = cropped_stack_iso.shape[1], cropped_stack_iso.shape[2]
+            cropped_stack_aligned = cropped_stack_iso[z0:z1, ptr:H - ptr, ptr:W - ptr]
+            np.save(str(out / f"{name_prefix}_cropped_stack_aligned.npy"), cropped_stack_aligned)
+            print(f"  Aligned 3-D shape: {cropped_stack_aligned.shape}  (2 µm iso)")
+
+        # ── Core outputs (always saved) ───────────────────────────────────
+        np.save(str(out / f"{name_prefix}_vessel_translation_aligned.npy"), self.vessel_pred_iso)
+
+        ar = self.analysis_results
+        np.save(str(out / f"{name_prefix}_clean_segmentation.npy"), ar["clean_segmentation"])
+        np.save(str(out / f"{name_prefix}_skeleton.npy"), ar["skeleton_from_graph"])
+
+        metrics_df = ar['global_metrics_df']
+        metrics_df.to_csv(str(out / f"{name_prefix}_analysis_metrics.csv"), index=False)
+        print(f"  Metrics → {name_prefix}_analysis_metrics.csv")
+
+        # ── Organoid mask (if applicable) ────────────────────────────────
+        if self._exclusion_mask_xy_aligned is not None:
+            np.save(str(out / f"{name_prefix}_organoid_mask.npy"),
+                    self._exclusion_mask_xy_aligned.astype(np.uint8))
+
+        # ── Extra interim outputs for full napari visualisation ───────────
+        if save_all_interim:
+            from skeletonisation import build_internal_pore_label_volumes, graph2image
+            import pickle
+
+            seg = ar["clean_segmentation"].astype(bool)
+            holes, hole_labels, hole_dist = build_internal_pore_label_volumes(
+                seg, voxel_size_um=(2.0, 2.0, 2.0), max_pore_area_fraction_of_slice=0.10,
+            )
+            full_skel = graph2image(ar["graph"], self.vessel_mask_iso.shape).astype(np.int32)
+
+            np.save(str(out / f"{name_prefix}_holes.npy"), holes)
+            np.save(str(out / f"{name_prefix}_hole_labels_per_slice.npy"), hole_labels)
+            np.save(str(out / f"{name_prefix}_hole_distance_per_slice_um.npy"), hole_dist)
+            np.save(str(out / f"{name_prefix}_full_graph_skeleton.npy"), full_skel)
+            np.save(str(out / f"{name_prefix}_vessel_mask.npy"), self.vessel_mask_iso)
+
+            # Graph node coordinates (sprout vs junction) as .npz
+            clean_graph = ar["clean_graph"]
+            node_ids = list(clean_graph.nodes())
+            if node_ids:
+                pts = np.array([clean_graph.nodes[n]['pts'] for n in node_ids], dtype=float)
+                is_sprout = np.array([bool(clean_graph.nodes[n].get('sprout', False)) for n in node_ids])
+                np.savez(str(out / f"{name_prefix}_graph_nodes.npz"),
+                         pts=pts, is_sprout=is_sprout)
+
+            with open(str(out / f"{name_prefix}_clean_graph.pkl"), "wb") as f:
+                pickle.dump(clean_graph, f)
+
+            print(f"  Saved all interim outputs for napari visualisation")
+
+        print(f"  ✓ Done: {name_prefix}")
         
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run VascuMap in GUI or no-GUI mode.")
@@ -348,11 +474,22 @@ if __name__ == "__main__":
         default=None,
         help="Directory with .lif/.tif/.tiff files (required with --no-gui).",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Base output directory. Per-image sub-folders are created inside.",
+    )
+    parser.add_argument(
+        "--save-all-interim",
+        action="store_true",
+        help="Save extra interim volumes for full napari visualisation.",
+    )
     args = parser.parse_args()
 
     if not args.no_gui:
         vascumap = VascuMap(use_device_segmentation_app=True)
-        vascumap.pipeline()
+        vascumap.pipeline(output_dir=args.output_dir, save_all_interim=args.save_all_interim)
     else:
         def _should_mask_from_name(p: Path) -> bool:
             return "marina" in p.name.lower()
@@ -363,6 +500,8 @@ if __name__ == "__main__":
         source_dir = Path(args.image_dir)
         if (not source_dir.exists()) or (not source_dir.is_dir()):
             raise ValueError(f"--image-dir must be an existing directory: {source_dir}")
+
+        output_base = Path(args.output_dir) if args.output_dir else Path.cwd()
 
         image_paths = sorted(
             [p for p in source_dir.iterdir() if p.is_file() and p.suffix.lower() in (".lif", ".tif", ".tiff")]
@@ -379,7 +518,6 @@ if __name__ == "__main__":
         for i, image_path in enumerate(image_paths, start=1):
             print(f"[{i}/{len(image_paths)}] Processing: {image_path.name}")
             mask_central_region = _should_mask_from_name(image_path)
-            print(f"  -> mask_central_region={mask_central_region} (filename contains 'marina': {mask_central_region})")
 
             if image_path.suffix.lower() == ".lif":
                 try:
@@ -387,7 +525,7 @@ if __name__ == "__main__":
                         n_images = len(lif.images)
                 except Exception as exc:
                     failures.append((str(image_path), f"Could not inspect .lif images: {exc}"))
-                    print(f"[FAILED] {image_path.name}: Could not inspect .lif images: {exc}")
+                    print(f"[FAILED] {image_path.name}: {exc}")
                     continue
 
                 for idx in range(n_images):
@@ -401,7 +539,10 @@ if __name__ == "__main__":
                             mask_central_region=mask_central_region,
                         )
                         vascumap.image_name = f"{image_path.stem}_img{idx}_{vascumap.image_name if vascumap.image_name else 'image'}"
-                        vascumap.pipeline()
+                        vascumap.pipeline(
+                            output_dir=output_base / vascumap.image_name,
+                            save_all_interim=args.save_all_interim,
+                        )
                         successes += 1
                     except Exception as exc:
                         failures.append((f"{image_path} (image_index={idx})", str(exc)))
@@ -415,7 +556,10 @@ if __name__ == "__main__":
                         mask_central_region=mask_central_region,
                     )
                     vascumap.image_name = f"{image_path.stem}_{vascumap.image_name if vascumap.image_name else 'image'}"
-                    vascumap.pipeline()
+                    vascumap.pipeline(
+                        output_dir=output_base / vascumap.image_name,
+                        save_all_interim=args.save_all_interim,
+                    )
                     successes += 1
                 except Exception as exc:
                     failures.append((str(image_path), str(exc)))

@@ -185,6 +185,7 @@ class DeviceSegmentationApp:
         self.hough_threshold = hough_threshold
         self.mask_sigma = mask_sigma
         self.mask_frac_thresh = mask_frac_thresh
+        self.channel = 0
 
         self.viewer = napari.Viewer(show=self.enable_gui)
 
@@ -477,7 +478,12 @@ class DeviceSegmentationApp:
                 arr = arr[np.newaxis, ...]
             elif arr.ndim == 3:
                 arr = arr if arr.shape[0] < 64 else arr[np.newaxis, ...]
-            elif arr.ndim != 4:
+            elif arr.ndim == 4:
+                # Multi-channel: pick the requested channel, collapse to 3-D
+                ch_axis = int(np.argmin(arr.shape[1:])) + 1
+                ch_idx = min(self.channel, arr.shape[ch_axis] - 1)
+                arr = np.take(arr, ch_idx, axis=ch_axis)
+            else:
                 raise ValueError(f"Unsupported LIF array shape: {arr.shape}")
 
             self._last_stack = arr.astype(np.float32)
@@ -1103,7 +1109,7 @@ class DeviceSegmentationApp:
 
         force_roi = clear_layers or self._roi_layer is None or len(getattr(self._roi_layer, "data", [])) == 0
         self._set_roi_layer(final_corners, force=force_roi)
-        self._update_outer_geometry_from_current_roi(30.0, update_message=False)
+        self._update_outer_geometry_from_current_roi(self.device_width_ok.device_width_um.value, update_message=False)
         self.images_output.value = (
             "[OK] Segmentation complete. Outer geometry is shown at default Device width=30 um; adjust width as needed."
         )
