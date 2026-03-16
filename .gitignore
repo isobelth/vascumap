@@ -2,6 +2,7 @@
 **/*.png
 **/*.pdf
 **/*.tif
+!**/README_images/**
 
 data/
 outputs/
