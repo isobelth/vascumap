@@ -3,6 +3,7 @@
 **/*.pdf
 **/*.tif
 !**/README_images/**
+!**/README_images/*
 
 data/
 outputs/
