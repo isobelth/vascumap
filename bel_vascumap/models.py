@@ -467,9 +467,12 @@ def predict_mask_ortho(model_smp, vessel_pred_iso, device):
         sw_device=device)
 
     with torch.no_grad():
-        output3D_axial =  torch.sigmoid(axial_inferer(vessel_pred_tensor, model_smp))
+        output3D_axial = torch.sigmoid(axial_inferer(vessel_pred_tensor, model_smp))
 
-    vessel_axial = output3D_axial.squeeze().to('cpu').numpy()
+    vessel_proba = output3D_axial.squeeze().to('cpu').numpy().astype(np.float32, copy=False)
+    del output3D_axial
+    if 'cuda' in device:
+        torch.cuda.empty_cache()
 
     if tensor_shape[2] < 256:
         pad_d = 256 - tensor_shape[2]
@@ -501,28 +504,35 @@ def predict_mask_ortho(model_smp, vessel_pred_iso, device):
 
     with torch.no_grad():
         output3D_coronal = torch.sigmoid(coronal_inferer(vessel_pred_tensor, model_smp))
-        output3D_sagital = torch.sigmoid(sagital_inferer(vessel_pred_tensor, model_smp))
 
     if tensor_shape[2] < 256:
         pad_d = 256 - tensor_shape[2]
         pad_pre = pad_d // 2
         vessel_coronal = output3D_coronal.squeeze().to('cpu').numpy()[pad_pre:pad_pre + tensor_shape[2], :, :]
-        vessel_sagital = output3D_sagital.squeeze().to('cpu').numpy()[pad_pre:pad_pre + tensor_shape[2], :, :]
-
     else:
         vessel_coronal = output3D_coronal.squeeze().to('cpu').numpy()
+
+    vessel_proba += vessel_coronal
+    del output3D_coronal, vessel_coronal
+    if 'cuda' in device:
+        torch.cuda.empty_cache()
+
+    with torch.no_grad():
+        output3D_sagital = torch.sigmoid(sagital_inferer(vessel_pred_tensor, model_smp))
+
+    if tensor_shape[2] < 256:
+        pad_d = 256 - tensor_shape[2]
+        pad_pre = pad_d // 2
+        vessel_sagital = output3D_sagital.squeeze().to('cpu').numpy()[pad_pre:pad_pre + tensor_shape[2], :, :]
+    else:
         vessel_sagital = output3D_sagital.squeeze().to('cpu').numpy()
 
-
-    vessel_proba = np.mean(
-        np.array([
-        vessel_axial, 
-        vessel_coronal,
-        vessel_sagital]), axis=0
-        )
+    vessel_proba += vessel_sagital
+    vessel_proba /= 3.0
+    del output3D_sagital, vessel_sagital
 
     model_smp.to('cpu')
-    del vessel_pred_tensor, output3D_axial, output3D_coronal, output3D_sagital
+    del vessel_pred_tensor
     if 'cuda' in device:
         torch.cuda.empty_cache()
     gc.collect()
