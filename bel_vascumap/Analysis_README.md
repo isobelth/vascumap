@@ -13,14 +13,7 @@ Symbols used below:
 
 Default voxel size is `(2, 2, 2) µm`.
 
-## Distance Convention (important)
 
-The notebook currently sets `junction_distance_mode = 'skeleton'`.
-
-- `skeleton`: nearest-neighbor distances are graph shortest-path lengths along vessel centerlines (biologically traversable route).
-- `euclidean`: nearest-neighbor distances are straight-line distances in physical space.
-
-Use one mode consistently across a study.
 
 ## Complete Output Parameter Dictionary
 
@@ -64,15 +57,23 @@ Use one mode consistently across a study.
 	- *Isn't that measuring the same thing as the spread in vessel/hole cross sectional area?* Not quite. Caliber and pore spread are size-distribution metrics; skeleton lacunarity is a spatial-organization metric. You can match one and change the other.
 <img src="README_images/lacunarity.png" width="75%" />
 
+## Pore Size
 
-
-## Pore Inclusion/Exclusion Rules
-
-Pores are detected slice-wise! Tracking pores across 3d slices is possible, but slow, so there is a tradeoff. There is a maximum area cutoff (`max_pore_area_fraction_of_slice`), which by default is 0.1 (10% of slice area), which removes empty areas outside the vasculature. Tiny holes (`min_pore_area_um2`, less than 16um^2 as default) are removed from downstream analysis. This suppresses tiny noise and very large likely-artifactual cavities.
+Pore size gives an extra description of the vasculature. Currently, pores are detected slice wise (no linking between z slices). Tracking pores across 3d slices is possible, but slow, so there is a tradeoff. There is a maximum area cutoff (`max_pore_area_fraction_of_slice`), which by default is 0.1 (10% of slice area), which removes empty areas outside the vasculature. Tiny holes (`min_pore_area_um2`, less than 16um^2 as default) are removed from downstream analysis. This suppresses tiny noise and very large likely-artifactual cavities.
 
 <img src="README_images/holes.png" width="25%" />
 
 
+## Distance Convention 
+
+There are multiple ways to measure "distance to nearest ....". As illustrated below, the nearest sprout tip to the highlighted branch point could be one of two options, depending on the metric chosen.
+
+<img src="README_images/distance_metrics.png" width="75%" />
+
+The notebook currently sets `junction_distance_mode = 'skeleton'`.
+
+- `skeleton`: nearest-neighbor distances are graph shortest-path lengths along vessel centerlines (biologically traversable route). This is currently the code default but can be updated if euclidean distance is more biologically relevant.
+- `euclidean`: nearest-neighbor distances are straight-line distances in physical space.
 
 
 
