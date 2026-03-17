@@ -68,12 +68,11 @@ Use one mode consistently across a study.
 
 ## Pore Inclusion/Exclusion Rules
 
-Pores are detected slice-wise as internal holes in `binary_fill_holes(vessel_slice) & ~vessel_slice`.
+Pores are detected slice-wise! Tracking pores across 3d slices is possible, but slow, so there is a tradeoff. There is a maximum area cutoff (`max_pore_area_fraction_of_slice`), which by default is 0.1 (10% of slice area), which removes empty areas outside the vasculature. Tiny holes (`min_pore_area_um2`, less than 16um^2 as default) are removed from downstream analysis. This suppresses tiny noise and very large likely-artifactual cavities.
 
-Validity filters used by the current code:
-- minimum pore area: `min_pore_area_um2 = 16.0`
-- maximum pore area: `max_pore_area_fraction_of_slice = 0.10` (10% of slice area)
+<img src="README_images/holes.png" width="25%" />
 
-This suppresses tiny noise and very large likely-artifactual cavities.
+
+
 
 

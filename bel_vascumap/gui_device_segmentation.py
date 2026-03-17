@@ -1045,6 +1045,12 @@ class DeviceSegmentationApp:
                 source_path = self._image_paths[image_index]
                 arr = np.asarray(tifffile.imread(str(source_path)))
 
+                # Multi-channel TIFF: extract the requested channel to get a 3-D stack
+                if arr.ndim == 4:
+                    ch_axis = int(np.argmin(arr.shape[1:])) + 1
+                    ch_idx = min(self.channel, arr.shape[ch_axis] - 1)
+                    arr = np.take(arr, ch_idx, axis=ch_axis)
+
                 z_um, y_um, x_um = read_voxel_size_um(Path(source_path), source_is_lif=False)
                 self._set_last_voxel_steps(z_um, y_um, x_um)
 
