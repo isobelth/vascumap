@@ -28,6 +28,8 @@ class VascuMap:
         device_width_um: float = 35.0,
         mask_central_region: bool = False,
         channel: int = 0,
+        model_p2p=None,
+        model_unet=None,
     ) -> None:
         """Initialize the VascuMap workflow container.
 
@@ -38,13 +40,17 @@ class VascuMap:
             use_device_segmentation_app: If ``True``, start
                 :class:`DeviceSegmentationApp` and collect outputs. If ``False``,
                 initialization for the non-GUI path is not yet implemented.
+            model_p2p: Pre-loaded Pix2Pix model. If ``None``, loaded from
+                ``pix2pix_model_path``.
+            model_unet: Pre-loaded UNet segmentation model. If ``None``, loaded
+                from ``unet_model_path``.
 
         Raises:
             NotImplementedError: If ``use_device_segmentation_app`` is ``False``.
         """
         
-        self.model_p2p = Pix2Pix(model_path=pix2pix_model_path)
-        self.model_unet = load_segmentation_model(unet_model_path)
+        self.model_p2p = model_p2p if model_p2p is not None else Pix2Pix(model_path=pix2pix_model_path)
+        self.model_unet = model_unet if model_unet is not None else load_segmentation_model(unet_model_path)
         self.unet_model_path = unet_model_path
         self.app = None
         self.use_device_segmentation_app = bool(use_device_segmentation_app)
@@ -62,6 +68,8 @@ class VascuMap:
         self._z_stop_final = None
         self._pixels_to_remove = None
         self._exclusion_mask_xy_aligned = None
+        self.image_source_path = image_source_path
+        self.image_index = int(image_index) if image_index is not None else 0
         
         if self.use_device_segmentation_app:
             self.app = DeviceSegmentationApp()
@@ -428,35 +436,38 @@ class VascuMap:
         )
         print(f"  Skeleton overview → {name_prefix}_skeleton_overview.png")
 
-        # ── Aligned cropped stack (2 µm iso) ─────────────────────────────
-        z0, z1, ptr = self._z_start_final, self._z_stop_final, self._pixels_to_remove
-        if z0 is not None and z1 is not None and ptr is not None:
-            cropped_stack_iso = resize_dask(self.cropped_stack, [2.5, 1, 1])
-            H, W = cropped_stack_iso.shape[1], cropped_stack_iso.shape[2]
-            cropped_stack_aligned = cropped_stack_iso[z0:z1, ptr:H - ptr, ptr:W - ptr]
-            np.save(str(out / f"{name_prefix}_cropped_stack_aligned.npy"), cropped_stack_aligned)
-            print(f"  Aligned 3-D shape: {cropped_stack_aligned.shape}  (2 µm iso)")
-
-        # ── Core outputs (always saved) ───────────────────────────────────
-        np.save(str(out / f"{name_prefix}_vessel_translation_aligned.npy"), self.vessel_pred_iso)
-
+        # ── Metrics CSV (always saved) ────────────────────────────────────
         ar = self.analysis_results
-        np.save(str(out / f"{name_prefix}_clean_segmentation.npy"), ar["clean_segmentation"])
-        np.save(str(out / f"{name_prefix}_skeleton.npy"), ar["skeleton_from_graph"])
-
-        metrics_df = ar['global_metrics_df']
+        metrics_df = ar['global_metrics_df'].copy()
+        # Prepend identification columns
+        src = Path(self.image_source_path) if self.image_source_path else None
+        metrics_df.insert(0, 'image_name', name_prefix)
+        metrics_df.insert(1, 'source_file', src.name if src else '')
+        metrics_df.insert(2, 'image_index', int(self.image_index))
         metrics_df.to_csv(str(out / f"{name_prefix}_analysis_metrics.csv"), index=False)
         print(f"  Metrics → {name_prefix}_analysis_metrics.csv")
 
-        # ── Organoid mask (if applicable) ────────────────────────────────
-        if self._exclusion_mask_xy_aligned is not None:
-            np.save(str(out / f"{name_prefix}_organoid_mask.npy"),
-                    self._exclusion_mask_xy_aligned.astype(np.uint8))
-
-        # ── Extra interim outputs for full napari visualisation ───────────
+        # ── Extra outputs for full napari visualisation ───────────────────
         if save_all_interim:
             from skeletonisation import build_internal_pore_label_volumes, graph2image
             import pickle
+
+            # ── Aligned cropped stack (2 µm iso) ─────────────────────────
+            z0, z1, ptr = self._z_start_final, self._z_stop_final, self._pixels_to_remove
+            if z0 is not None and z1 is not None and ptr is not None:
+                cropped_stack_iso = resize_dask(self.cropped_stack, [2.5, 1, 1])
+                H, W = cropped_stack_iso.shape[1], cropped_stack_iso.shape[2]
+                cropped_stack_aligned = cropped_stack_iso[z0:z1, ptr:H - ptr, ptr:W - ptr]
+                np.save(str(out / f"{name_prefix}_cropped_stack_aligned.npy"), cropped_stack_aligned)
+                print(f"  Aligned 3-D shape: {cropped_stack_aligned.shape}  (2 µm iso)")
+
+            np.save(str(out / f"{name_prefix}_vessel_translation_aligned.npy"), self.vessel_pred_iso)
+            np.save(str(out / f"{name_prefix}_clean_segmentation.npy"), ar["clean_segmentation"])
+            np.save(str(out / f"{name_prefix}_skeleton.npy"), ar["skeleton_from_graph"])
+
+            if self._exclusion_mask_xy_aligned is not None:
+                np.save(str(out / f"{name_prefix}_organoid_mask.npy"),
+                        self._exclusion_mask_xy_aligned.astype(np.uint8))
 
             seg = ar["clean_segmentation"].astype(bool)
             holes, hole_labels, hole_dist = build_internal_pore_label_volumes(

@@ -92,6 +92,10 @@ def cupy_chunk_processing(volume, processing_func, chunk_size=(64, 512, 512),
     pool = cp.get_default_memory_pool()
     z_steps = range(0, volume.shape[0], chunk_size[0])
 
+    # Pre-convert constant args/kwargs to CuPy once (avoids repeated CPU→GPU transfers)
+    gpu_args = [cp.asarray(arg) if isinstance(arg, np.ndarray) else arg for arg in args]
+    gpu_kwargs = {k: cp.asarray(v) if isinstance(v, np.ndarray) else v for k, v in kwargs.items()}
+
     for z in tqdm(z_steps, desc="Processing chunks"):
         for y in range(0, volume.shape[1], chunk_size[1]):
             for x in range(0, volume.shape[2], chunk_size[2]):
@@ -107,24 +111,7 @@ def cupy_chunk_processing(volume, processing_func, chunk_size=(64, 512, 512),
                 chunk = volume[z_start:z_end, y_start:y_end, x_start:x_end]
                 chunk_gpu = cp.asarray(chunk)
 
-                def func_wrapper(gpu_chunk):
-                    gpu_args = []
-                    for arg in args:
-                        if isinstance(arg, np.ndarray):
-                            gpu_args.append(cp.asarray(arg))
-                        else:
-                            gpu_args.append(arg)
-
-                    gpu_kwargs = {}
-                    for k, v in kwargs.items():
-                        if isinstance(v, np.ndarray):
-                            gpu_kwargs[k] = cp.asarray(v)
-                        else:
-                            gpu_kwargs[k] = v
-
-                    return processing_func(gpu_chunk, *gpu_args, **gpu_kwargs)
-
-                filtered_chunk = func_wrapper(chunk_gpu)
+                filtered_chunk = processing_func(chunk_gpu, *gpu_args, **gpu_kwargs)
 
                 w_z_start = z - z_start
                 w_z_end = w_z_start + chunk_size[0]
