@@ -47,6 +47,26 @@ def safe_percentile_spread(values, low=10, high=90):
     return float(q[1] - q[0])
 
 
+def trim_segmentation(segmentation, fill_threshold=0.75):
+    """Trim top/bottom slices where the fill fraction exceeds *fill_threshold*.
+
+    Only peels from the outer edges — middle slices are never removed.
+
+    Returns:
+        (trimmed_segmentation, keep_start, keep_stop)  where keep_stop is
+        exclusive, suitable for slicing ``arr[keep_start:keep_stop]``.
+    """
+    slice_fill = segmentation.astype(bool).mean(axis=(1, 2))
+    keep_start = 0
+    while keep_start < len(slice_fill) and slice_fill[keep_start] > fill_threshold:
+        keep_start += 1
+    keep_end = len(slice_fill) - 1
+    while keep_end >= keep_start and slice_fill[keep_end] > fill_threshold:
+        keep_end -= 1
+    keep_stop = keep_end + 1
+    return segmentation[keep_start:keep_stop], keep_start, keep_stop
+
+
 # ---------------------------------------------------------------------------
 # Skeleton / graph helpers
 # ---------------------------------------------------------------------------
@@ -489,6 +509,118 @@ def build_internal_pore_label_volumes(
             ).astype(np.float32)
 
     return holes, hole_labels_per_slice, hole_distance_per_slice_um
+
+
+# ---------------------------------------------------------------------------
+# Skeleton overview visualisation
+# ---------------------------------------------------------------------------
+
+def generate_skeleton_overview_plot(segmentation, analysis_results, title="", save_path=None):
+    """Generate and optionally save the 4-panel skeleton/graph overview plot.
+
+    Panels: (1) full skeleton overlay, (2) clean skeleton overlay,
+    (3) graph from clean skeleton with diameter colouring,
+    (4) pruned clean graph with diameter colouring.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+    from matplotlib.colors import Normalize
+    from scipy.ndimage import maximum_filter
+
+    skeleton = analysis_results['skeleton']
+    clean_skeleton = analysis_results['skeleton_from_graph']
+    clean_graph = analysis_results['clean_graph']
+    binary_edt = analysis_results['binary_edt']
+
+    nz = segmentation.shape[0]
+    seg_bool = segmentation.astype(bool)
+    seg_max = np.mean(seg_bool, axis=0).astype(np.float32)
+    background = np.stack([seg_max * 0.40] * 3, axis=-1)
+
+    def _make_overlay(seg_bg, arr):
+        thick = maximum_filter(np.sum(arr.astype(np.float32), axis=0), size=3)
+        norm = thick / max(thick.max(), 1)
+        rgb = np.stack([seg_bg * 0.40] * 3, axis=-1)
+        mask = norm > 0
+        rgb[mask] = cm.get_cmap('cool')(norm[mask])[:, :3]
+        return np.clip(rgb, 0, 1)
+
+    overlay_skel = _make_overlay(seg_max, skeleton)
+    overlay_clean = _make_overlay(seg_max, clean_skeleton)
+
+    # Build a graph from the clean skeleton image for display
+    raw_graph = sknw.build_sknw(clean_skeleton.astype(bool))
+    for _n in list(raw_graph.nodes()):
+        if raw_graph.nodes[_n]['pts'].ndim > 1:
+            raw_graph.nodes[_n]['pts'] = raw_graph.nodes[_n]['pts'][0]
+
+    def _edge_diameters(g):
+        diams = []
+        for u, v in g.edges():
+            try:
+                pts = np.clip(g[u][v]['pts'].astype(int),
+                              [0, 0, 0],
+                              [s - 1 for s in binary_edt.shape])
+                radii = binary_edt[pts[:, 0], pts[:, 1], pts[:, 2]]
+                diams.append(float(np.median(radii)) * 2.0)
+            except (KeyError, IndexError):
+                diams.append(0.0)
+        return diams
+
+    raw_diams = _edge_diameters(raw_graph)
+    clean_diams = _edge_diameters(clean_graph)
+
+    all_diams = [d for d in raw_diams + clean_diams if d > 0]
+    vmin = np.percentile(all_diams, 5) * 0.5 if all_diams else 0
+    vmax = np.percentile(all_diams, 95) if all_diams else 1
+    norm_g = Normalize(vmin=vmin, vmax=vmax)
+    sm = cm.ScalarMappable(norm=norm_g, cmap=cm.magma)
+
+    def _draw_graph(ax, g, diams, graph_title):
+        ax.imshow(background)
+        for (u, v), diam in zip(g.edges(), diams):
+            try:
+                pts = g[u][v]['pts'].astype(int)
+                ax.plot(pts[:, 2], pts[:, 1],
+                        color=sm.to_rgba(diam), linewidth=2.0, solid_capstyle='round')
+            except (KeyError, IndexError):
+                continue
+        nx_x, nx_y, nc = [], [], []
+        for node in g.nodes():
+            pos = g.nodes[node]['pts']
+            if pos.ndim > 1:
+                pos = pos[0]
+            nx_x.append(pos[2])
+            nx_y.append(pos[1])
+            nc.append('lime' if g.degree(node) == 1 else 'white')
+        if nx_x:
+            ax.scatter(nx_x, nx_y, c=nc, s=20, alpha=0.8, zorder=5)
+        ax.set_title(f'{graph_title}\n({g.number_of_nodes()} nodes, {g.number_of_edges()} edges)',
+                     fontsize=13)
+        ax.set_aspect('equal', adjustable='box')
+
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(ncols=4, figsize=(24, 16))
+
+    ax[0].imshow(overlay_skel)
+    ax[0].set_title(f'Skeleton  ({int(skeleton.sum()):,} voxels,  {nz} z-slices)', fontsize=13)
+
+    ax[1].imshow(overlay_clean)
+    ax[1].set_title(f'Clean skeleton  ({int(clean_skeleton.sum()):,} voxels,  {nz} z-slices)', fontsize=13)
+
+    _draw_graph(ax[2], raw_graph, raw_diams, 'Graph (clean skeleton)')
+    _draw_graph(ax[3], clean_graph, clean_diams, 'Clean graph (pruned)')
+
+    fig.colorbar(sm, ax=ax[-1], fraction=0.02, pad=0.02, label='Vessel diameter (\u00b5m)')
+    for a in ax:
+        a.axis("off")
+    plt.suptitle(title, fontsize=16)
+    plt.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        plt.show()
 
 
 # ---------------------------------------------------------------------------

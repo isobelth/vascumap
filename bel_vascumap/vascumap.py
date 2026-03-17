@@ -13,7 +13,7 @@ from warnings import filterwarnings
 
 from models import Pix2Pix, load_segmentation_model, predict_mask_ortho, process_vessel_mask
 from utils import scale, resize_dask
-from skeletonisation import clean_and_analyse
+from skeletonisation import clean_and_analyse, trim_segmentation, generate_skeleton_overview_plot
 
 filterwarnings('ignore')
 
@@ -405,7 +405,28 @@ class VascuMap:
         if self._z_start_final is None:
             print(f"  ⚠ Skipping {name_prefix}: postprocess found no strong vote planes.")
             return
+
+        # ── Trim over-segmented edge slices ──────────────────────────────
+        orig_z = self.vessel_mask_iso.shape[0]
+        trimmed, trim_start, trim_stop = trim_segmentation(self.vessel_mask_iso)
+        if trim_start > 0 or trim_stop < orig_z:
+            old_z0 = self._z_start_final
+            self.vessel_mask_iso = trimmed
+            self.vessel_pred_iso = self.vessel_pred_iso[trim_start:trim_stop]
+            self._z_start_final = old_z0 + trim_start
+            self._z_stop_final = old_z0 + trim_stop
+            print(f"  Trimmed {trim_start} top / {orig_z - trim_stop} bottom over-segmented z-slices")
+
         self.skeletonisation_and_analysis()
+
+        # ── Skeleton overview plot ────────────────────────────────────────
+        generate_skeleton_overview_plot(
+            self.vessel_mask_iso,
+            self.analysis_results,
+            title=name_prefix,
+            save_path=str(out / f"{name_prefix}_skeleton_overview.png"),
+        )
+        print(f"  Skeleton overview → {name_prefix}_skeleton_overview.png")
 
         # ── Aligned cropped stack (2 µm iso) ─────────────────────────────
         z0, z1, ptr = self._z_start_final, self._z_stop_final, self._pixels_to_remove
