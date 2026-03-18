@@ -201,6 +201,7 @@ class DeviceSegmentationApp:
         self._cropped_layer = None
         self._last_image = None
         self._hough_fallback_used = False
+        self._last_segment_debug = None
 
         self._last_stack = None
         self._last_focus_downsample = 1
@@ -399,7 +400,79 @@ class DeviceSegmentationApp:
         hough_tag = "_hough" if self._hough_fallback_used else ""
         overlay_path = out_dir / f"{name_prefix}_overlay_geometry{hough_tag}_{int(run_suffix)}.tif"
         tifffile.imwrite(str(overlay_path), overlay)
+
+        if self._hough_fallback_used:
+            self._save_hough_diagnostic_plot(name_prefix, out_dir)
+
         return overlay_path
+
+    def _save_hough_diagnostic_plot(self, name_prefix: str, out_dir: Path):
+        """Save a multi-panel diagnostic PNG when Hough fallback was triggered."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        debug = self._last_segment_debug
+        if debug is None:
+            return
+
+        base = self._last_image
+        if base is not None and base.ndim == 3:
+            base = np.mean(base, axis=-1)
+
+        panels = [
+            ("In-focus plane", base, "gray"),
+            ("Sobel edge map", debug.get("sobel_operated"), "gray"),
+            ("Binary threshold", debug.get("binary"), "gray"),
+            ("Filtered labels (dilate input)", debug.get("labels_to_dilate"), "nipy_spectral"),
+            ("Post-dilation mask", debug.get("post_dilation_mask"), "gray"),
+            ("Device mask (primary)", debug.get("device_mask"), "gray"),
+            ("Hough edges input", debug.get("edges"), "gray"),
+            ("Hough reconstructed lines", debug.get("reconstructed"), "gray"),
+            ("Hough combined mask", debug.get("reconstructed_mask"), "gray"),
+        ]
+
+        # Filter out None panels
+        panels = [(t, img, cm) for t, img, cm in panels if img is not None]
+        n = len(panels)
+        if n == 0:
+            return
+
+        ncols = min(n, 3)
+        nrows = (n + ncols - 1) // ncols
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 6 * nrows))
+        if nrows * ncols == 1:
+            axes = np.array([axes])
+        axes = np.atleast_2d(axes)
+
+        for idx, (title, img, cmap) in enumerate(panels):
+            r, c = divmod(idx, ncols)
+            ax = axes[r, c]
+            ax.imshow(np.asarray(img), cmap=cmap, aspect="equal")
+
+            # Draw final corners if available
+            corners = debug.get("final_corners")
+            if corners is not None and idx == len(panels) - 1:
+                corners = np.asarray(corners)
+                closed = np.vstack([corners, corners[0:1]])
+                ax.plot(closed[:, 0], closed[:, 1], "r-", linewidth=2, label="final rect")
+                ax.legend(fontsize=8)
+
+            ax.set_title(title, fontsize=11)
+            ax.axis("off")
+
+        # Hide unused subplots
+        for idx in range(n, nrows * ncols):
+            r, c = divmod(idx, ncols)
+            axes[r, c].axis("off")
+
+        fig.suptitle(f"Hough fallback diagnostic — {name_prefix}", fontsize=14)
+        plt.tight_layout()
+        save_path = Path(out_dir) / f"{name_prefix}_hough_diagnostic.png"
+        fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Hough diagnostic plot → {save_path.name}")
 
     # -------- Focus helpers (integrated; no separate class) --------
     def _to_gray(self, im):
@@ -1099,6 +1172,8 @@ class DeviceSegmentationApp:
         except Exception as e:
             self.images_output.value = f"[ERROR] Segmentation failed: {type(e).__name__}: {e}"
             return
+
+        self._last_segment_debug = debug
 
         if clear_layers:
             self.viewer.layers.clear()
