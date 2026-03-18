@@ -200,6 +200,7 @@ class DeviceSegmentationApp:
         self._syncing_outer_geometry = False
         self._cropped_layer = None
         self._last_image = None
+        self._hough_fallback_used = False
 
         self._last_stack = None
         self._last_focus_downsample = 1
@@ -395,7 +396,8 @@ class DeviceSegmentationApp:
         draw_corners(inner_corners_yx, (255, 0, 0))
         draw_corners(outer_corners_yx, (255, 255, 0))
 
-        overlay_path = out_dir / f"{name_prefix}_overlay_geometry_{int(run_suffix)}.tif"
+        hough_tag = "_hough" if self._hough_fallback_used else ""
+        overlay_path = out_dir / f"{name_prefix}_overlay_geometry{hough_tag}_{int(run_suffix)}.tif"
         tifffile.imwrite(str(overlay_path), overlay)
         return overlay_path
 
@@ -474,17 +476,21 @@ class DeviceSegmentationApp:
                 img = lif.images[idx]
                 image = img.asarray()
             arr = np.asarray(image)
+            print(f"  [LIF] Raw array shape: {arr.shape}  dtype={arr.dtype}")
             if arr.ndim == 2:
                 arr = arr[np.newaxis, ...]
             elif arr.ndim == 3:
                 arr = arr if arr.shape[0] < 64 else arr[np.newaxis, ...]
             elif arr.ndim == 4:
-                # Multi-channel: pick the requested channel, collapse to 3-D
-                ch_axis = int(np.argmin(arr.shape[1:])) + 1
+                # Multi-channel: channel dim has size < 4; z is always > 5
+                ch_candidates = [i for i in range(arr.ndim) if arr.shape[i] < 4]
+                ch_axis = ch_candidates[0] if ch_candidates else int(np.argmin(arr.shape))
                 ch_idx = min(self.channel, arr.shape[ch_axis] - 1)
+                print(f"  [LIF] 4-D → extracting channel {ch_idx} along axis {ch_axis} (shape={arr.shape})")
                 arr = np.take(arr, ch_idx, axis=ch_axis)
             else:
                 raise ValueError(f"Unsupported LIF array shape: {arr.shape}")
+            print(f"  [LIF] Final stack shape: {arr.shape}")
 
             self._last_stack = arr.astype(np.float32)
             z_um, y_um, x_um = read_voxel_size_um(
@@ -846,8 +852,24 @@ class DeviceSegmentationApp:
         new_corners = new_angle_rad = new_centroid_xy = None
 
         corners, angle_rad, centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(device_mask)
-        if corners is None or self._corners_touch_border(corners, device_mask.shape, margin=5):
+        # Check if device mask itself touches the image border (more reliable
+        # than only checking the oriented-rectangle corners, which can be
+        # pulled inward by neck/flare cropping).
+        h, w = device_mask.shape
+        mask_touches_border = (
+            device_mask[0, :].any() or device_mask[-1, :].any() or
+            device_mask[:, 0].any() or device_mask[:, -1].any()
+        )
+        if corners is None or self._corners_touch_border(corners, device_mask.shape, margin=5) or mask_touches_border:
             flag = True
+            self._hough_fallback_used = True
+            if corners is None:
+                reason = "corners is None"
+            elif mask_touches_border:
+                reason = "device mask touches image border"
+            else:
+                reason = "corners touch border"
+            print(f"  [Hough fallback] Primary device detection failed ({reason}) — using probabilistic Hough lines")
             edges = remove_small_objects(labels_to_dilate > 0)
             segs = probabilistic_hough_line(
                 edges,
@@ -1044,12 +1066,17 @@ class DeviceSegmentationApp:
             else:
                 source_path = self._image_paths[image_index]
                 arr = np.asarray(tifffile.imread(str(source_path)))
+                print(f"  [TIFF] Raw array shape: {arr.shape}  dtype={arr.dtype}")
 
                 # Multi-channel TIFF: extract the requested channel to get a 3-D stack
                 if arr.ndim == 4:
-                    ch_axis = int(np.argmin(arr.shape[1:])) + 1
+                    # Channel dim has size < 4; z is always > 5
+                    ch_candidates = [i for i in range(arr.ndim) if arr.shape[i] < 4]
+                    ch_axis = ch_candidates[0] if ch_candidates else int(np.argmin(arr.shape))
                     ch_idx = min(self.channel, arr.shape[ch_axis] - 1)
+                    print(f"  [TIFF] 4-D → extracting channel {ch_idx} along axis {ch_axis} (shape={arr.shape})")
                     arr = np.take(arr, ch_idx, axis=ch_axis)
+                print(f"  [TIFF] Final stack shape: {arr.shape}")
 
                 z_um, y_um, x_um = read_voxel_size_um(Path(source_path), source_is_lif=False)
                 self._set_last_voxel_steps(z_um, y_um, x_um)
