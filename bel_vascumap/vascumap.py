@@ -26,6 +26,7 @@ class VascuMap:
         image_source_path: str | None = None,
         image_index: int = 0,
         device_width_um: float = 35.0,
+        hough_line_length: int = 400,
         mask_central_region: bool = False,
         channel: int = 0,
         model_p2p=None,
@@ -70,9 +71,10 @@ class VascuMap:
         self._exclusion_mask_xy_aligned = None
         self.image_source_path = image_source_path
         self.image_index = int(image_index) if image_index is not None else 0
+        self.hough_line_length = int(hough_line_length)
         
         if self.use_device_segmentation_app:
-            self.app = DeviceSegmentationApp()
+            self.app = DeviceSegmentationApp(line_length=self.hough_line_length)
             napari.run()
             outputs = self.app.get_cropped_outputs()
             self.cropped_stack, self.device_width_um, self.pixel_size_um, self.z_votes, self.image_name = outputs[:5]
@@ -87,7 +89,7 @@ class VascuMap:
             if (not src.exists()) or src.suffix.lower() not in (".tif", ".tiff", ".lif"):
                 raise ValueError("image_source_path must exist and be a .tif/.tiff/.lif file.")
 
-            self.app = DeviceSegmentationApp(enable_gui=False)
+            self.app = DeviceSegmentationApp(enable_gui=False, line_length=self.hough_line_length)
             self.app.channel = int(channel)
             outputs = self.app.run_automatic(
                 image_source=src,
