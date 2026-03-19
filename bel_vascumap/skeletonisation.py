@@ -613,10 +613,12 @@ def build_internal_pore_label_volumes(
 # Skeleton overview visualisation
 # ---------------------------------------------------------------------------
 
-def generate_skeleton_overview_plot(segmentation, analysis_results, title="", save_path=None):
-    """Generate and optionally save the 4-panel skeleton/graph overview plot.
+def generate_skeleton_overview_plot(segmentation, analysis_results, title="", save_path=None,
+                                    brightfield_stack=None, organoid_mask_xy=None):
+    """Generate and optionally save the 5-panel skeleton/graph overview plot.
 
-    Panels: (1) full skeleton overlay, (2) clean skeleton overlay,
+    Panels: (0) brightfield input with organoid mask and device boundary overlay,
+    (1) full skeleton overlay, (2) clean skeleton overlay,
     (3) graph from clean skeleton with diameter colouring,
     (4) pruned clean graph with diameter colouring.
     """
@@ -698,16 +700,39 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
         ax.set_aspect('equal', adjustable='box')
 
     plt.style.use('dark_background')
-    fig, ax = plt.subplots(ncols=4, figsize=(24, 16))
+    fig, ax = plt.subplots(ncols=5, figsize=(30, 16))
 
-    ax[0].imshow(overlay_skel)
-    ax[0].set_title(f'Skeleton  ({int(skeleton.sum()):,} voxels,  {nz} z-slices)', fontsize=13)
+    # ── Panel 0: brightfield input with organoid mask + device boundary ──────
+    if brightfield_stack is not None:
+        bf_2d = np.mean(brightfield_stack.astype(np.float32), axis=0)
+        bf_min, bf_max = bf_2d.min(), bf_2d.max()
+        bf_norm = (bf_2d - bf_min) / max(float(bf_max - bf_min), 1e-6)
+        rgb_bf = np.stack([bf_norm] * 3, axis=-1)
+        if organoid_mask_xy is not None:
+            mask = np.asarray(organoid_mask_xy, dtype=bool)
+            if mask.shape == bf_2d.shape:
+                rgb_bf[mask] = rgb_bf[mask] * 0.3 + np.array([0.0, 0.8, 0.8]) * 0.7
+        ax[0].imshow(np.clip(rgb_bf, 0, 1))
+        H, W = bf_2d.shape
+        border_x = [1, W - 2, W - 2, 1, 1]
+        border_y = [1, 1, H - 2, H - 2, 1]
+        ax[0].plot(border_x, border_y, color='yellow', linewidth=2, label='device boundary')
+        ax[0].legend(fontsize=8, loc='upper right')
+        bf_title = 'Brightfield input'
+        if organoid_mask_xy is not None:
+            bf_title += '\n(organoid mask, teal)'
+        ax[0].set_title(bf_title, fontsize=13)
+    else:
+        ax[0].axis('off')
 
-    ax[1].imshow(overlay_clean)
-    ax[1].set_title(f'Clean skeleton  ({int(clean_skeleton.sum()):,} voxels,  {nz} z-slices)', fontsize=13)
+    ax[1].imshow(overlay_skel)
+    ax[1].set_title(f'Skeleton  ({int(skeleton.sum()):,} voxels,  {nz} z-slices)', fontsize=13)
 
-    _draw_graph(ax[2], raw_graph, raw_diams, 'Graph (clean skeleton)')
-    _draw_graph(ax[3], clean_graph, clean_diams, 'Clean graph (pruned)')
+    ax[2].imshow(overlay_clean)
+    ax[2].set_title(f'Clean skeleton  ({int(clean_skeleton.sum()):,} voxels,  {nz} z-slices)', fontsize=13)
+
+    _draw_graph(ax[3], raw_graph, raw_diams, 'Graph (clean skeleton)')
+    _draw_graph(ax[4], clean_graph, clean_diams, 'Clean graph (pruned)')
 
     fig.colorbar(sm, ax=ax[-1], fraction=0.02, pad=0.02, label='Vessel diameter (\u00b5m)')
     for a in ax:

@@ -407,6 +407,7 @@ class VascuMap:
             )
 
         # ── Run pipeline stages ───────────────────────────────────────────
+        # (Commented out for device-segmentation-only testing)
         result = self.preprocess()
         if result is None and self.cropped_stack is None:
             print(f"  ⚠ Skipping {name_prefix}: no valid z-range / cropped stack.")
@@ -436,6 +437,8 @@ class VascuMap:
             self.analysis_results,
             title=name_prefix,
             save_path=str(out / f"{name_prefix}_skeleton_overview.png"),
+            brightfield_stack=self.cropped_stack,
+            organoid_mask_xy=self.cropped_organoid_mask_xy,
         )
         print(f"  Skeleton overview → {name_prefix}_skeleton_overview.png")
 

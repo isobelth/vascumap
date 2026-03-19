@@ -7,7 +7,7 @@ import napari
 from magicgui import magicgui
 from magicgui.widgets import Container, TextEdit
 from skimage import util
-from skimage.filters import threshold_triangle, median, sobel, gaussian, threshold_yen, threshold_otsu
+from skimage.filters import threshold_triangle, median, sobel, gaussian, threshold_yen, threshold_otsu, try_all_threshold, threshold_minimum
 from skimage.measure import label, regionprops_table, regionprops, moments_central
 from skimage.morphology import disk, remove_small_objects, remove_small_holes, closing
 from skimage.transform import ProjectiveTransform, warp, probabilistic_hough_line
@@ -168,10 +168,10 @@ class DeviceSegmentationApp:
         min_run_frac: float = 0.25,
         typical_pct: float = 50.0,
         line_length: int = 400,
-        line_gap: int = 900,
+        line_gap: int = 200,
         hough_threshold: int = 70,
         mask_sigma: float = 2.0,
-        mask_frac_thresh: float = 0.70,
+        mask_frac_thresh: float = 0.40,
     ):
         self.enable_gui = bool(enable_gui)
         self.low_frac = low_frac
@@ -783,7 +783,7 @@ class DeviceSegmentationApp:
         yy, xx = np.ogrid[:H, :W]
         central_roi = (yy - cyi) ** 2 + (xx - cxi) ** 2 <= r**2
 
-        thresh = threshold_yen(inverted)
+        thresh = threshold_minimum(inverted)
         labelled = label(inverted > thresh)
         props = regionprops(labelled)
         if len(props) == 0:
@@ -796,13 +796,15 @@ class DeviceSegmentationApp:
             return (-overlap, dist2)
 
         best_prop = min(props, key=score)
-        if (best_prop.area > xy_area * self.mask_frac_thresh) or (best_prop.solidity < 0.5):
-            thresh = threshold_otsu(inverted)
-            labelled = label(inverted > thresh)
-            props = regionprops(labelled)
-            if len(props) == 0:
-                return np.zeros((H, W), dtype=bool)
-            best_prop = min(props, key=score)
+        # py, px = best_prop.centroid
+        # center_dist_frac = np.sqrt((py - cyi) ** 2 + (px - cxi) ** 2) / min(H, W)
+        # if best_prop.solidity < 0.5 or center_dist_frac > 0.3:
+        #     thresh = threshold_otsu(inverted)
+        #     labelled = label(inverted > thresh)
+        #     props = regionprops(labelled)
+        #     if len(props) == 0:
+        #         return np.zeros((H, W), dtype=bool)
+        #     best_prop = min(props, key=score)
 
         organoid_region = labelled == best_prop.label
         organoid_region = remove_small_holes(organoid_region, area_threshold=50000)
@@ -1014,7 +1016,11 @@ class DeviceSegmentationApp:
                 best_c = max(non_border, key=lambda p: p.area)
                 rescue_mask = clab == best_c.label
                 rc, ra, rce = self._oriented_rect_corners_crop_necks_and_flares(rescue_mask)
+                area_fraction = best_c.area / (ch * cw)
                 if rc is not None and not self._corners_touch_border(rc, rescue_mask.shape, margin=5):
+                    if area_fraction < 0.40:
+                        print(f"  [Dilation rescue] disk({dil_radius}) found device but area is only {area_fraction:.1%} of image — still running Hough ({reason})")
+                        break
                     new_corners, new_angle_rad, new_centroid_xy = rc, ra, rce
                     rescue_closed_mask = closed
                     rescue_radius = dil_radius
