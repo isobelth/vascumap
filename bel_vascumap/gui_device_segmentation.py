@@ -11,7 +11,7 @@ from skimage.filters import threshold_triangle, median, sobel, gaussian, thresho
 from skimage.measure import label, regionprops_table, regionprops, moments_central
 from skimage.morphology import disk, remove_small_objects, remove_small_holes, closing
 from skimage.transform import ProjectiveTransform, warp, probabilistic_hough_line
-from scipy.ndimage import rotate, binary_dilation
+from scipy.ndimage import rotate, binary_dilation, binary_erosion
 from skimage.draw import line
 
 def read_voxel_size_um(
@@ -387,7 +387,7 @@ class DeviceSegmentationApp:
 
             # Add a strong contour so the region is visible on bright backgrounds.
             try:
-                eroded = ndi.binary_erosion(mask_xy, structure=np.ones((3, 3), dtype=bool))
+                eroded = binary_erosion(mask_xy, structure=np.ones((3, 3), dtype=bool))
                 boundary = mask_xy & ~eroded
                 overlay[boundary, 0] = int(rgb[0])
                 overlay[boundary, 1] = int(rgb[1])
@@ -433,13 +433,14 @@ class DeviceSegmentationApp:
         overlay_path = out_dir / f"{name_prefix}_overlay_geometry{hough_tag}_{int(run_suffix)}.tif"
         tifffile.imwrite(str(overlay_path), overlay)
 
-        if self._hough_fallback_used:
-            self._save_hough_diagnostic_plot(name_prefix, out_dir)
+        if debug_flag := (self._last_segment_debug or {}).get("flag", False):
+            self._save_segmentation_diagnostic_plot(name_prefix, out_dir)
 
         return overlay_path
 
-    def _save_hough_diagnostic_plot(self, name_prefix: str, out_dir: Path):
-        """Save a multi-panel diagnostic PNG when Hough fallback was triggered."""
+    def _save_segmentation_diagnostic_plot(self, name_prefix: str, out_dir: Path):
+        """Save a multi-panel diagnostic PNG whenever primary device detection
+        failed (either rescued by dilation or fell back to Hough)."""
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
@@ -452,6 +453,10 @@ class DeviceSegmentationApp:
         if base is not None and base.ndim == 3:
             base = np.mean(base, axis=-1)
 
+        rescued = debug.get("rescue_closed_mask") is not None
+        rescue_radius = debug.get("rescue_radius")
+
+        # Always-present panels
         panels = [
             ("In-focus plane", base, "gray"),
             ("Sobel edge map", debug.get("sobel_operated"), "gray"),
@@ -459,10 +464,19 @@ class DeviceSegmentationApp:
             ("Filtered labels (dilate input)", debug.get("labels_to_dilate"), "nipy_spectral"),
             ("Post-dilation mask", debug.get("post_dilation_mask"), "gray"),
             ("Device mask (primary)", debug.get("device_mask"), "gray"),
-            ("Hough edges input", debug.get("edges"), "gray"),
-            ("Hough reconstructed lines", debug.get("reconstructed"), "gray"),
-            ("Hough combined mask", debug.get("reconstructed_mask"), "gray"),
         ]
+
+        if rescued:
+            panels += [
+                (f"Dilation rescue (disk {rescue_radius}) closed mask",
+                 debug.get("rescue_closed_mask"), "gray"),
+            ]
+        else:
+            panels += [
+                ("Hough edges input", debug.get("edges"), "gray"),
+                ("Hough reconstructed lines", debug.get("reconstructed"), "gray"),
+                ("Hough combined mask", debug.get("reconstructed_mask"), "gray"),
+            ]
 
         # Filter out None panels
         panels = [(t, img, cm) for t, img, cm in panels if img is not None]
@@ -483,12 +497,12 @@ class DeviceSegmentationApp:
             ax = axes[r, c]
             ax.imshow(np.asarray(img), cmap=cmap, aspect="equal")
 
-            # Draw final corners if available
+            # Draw final corners on the last panel
             corners = debug.get("final_corners")
             if corners is not None and idx == len(panels) - 1:
                 corners = np.asarray(corners)
-                closed = np.vstack([corners, corners[0:1]])
-                ax.plot(closed[:, 0], closed[:, 1], "r-", linewidth=2, label="final rect")
+                closed_pts = np.vstack([corners, corners[0:1]])
+                ax.plot(closed_pts[:, 0], closed_pts[:, 1], "r-", linewidth=2, label="final rect")
                 ax.legend(fontsize=8)
 
             ax.set_title(title, fontsize=11)
@@ -499,12 +513,13 @@ class DeviceSegmentationApp:
             r, c = divmod(idx, ncols)
             axes[r, c].axis("off")
 
-        fig.suptitle(f"Hough fallback diagnostic — {name_prefix}", fontsize=14)
+        method = f"dilation rescue (disk {rescue_radius})" if rescued else "Hough fallback"
+        fig.suptitle(f"Device segmentation diagnostic [{method}] — {name_prefix}", fontsize=14)
         plt.tight_layout()
-        save_path = Path(out_dir) / f"{name_prefix}_hough_diagnostic.png"
+        save_path = Path(out_dir) / f"{name_prefix}_segmentation_diagnostic.png"
         fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
         plt.close(fig)
-        print(f"  Hough diagnostic plot → {save_path.name}")
+        print(f"  Segmentation diagnostic plot → {save_path.name}")
 
     # -------- Focus helpers (integrated; no separate class) --------
     def _to_gray(self, im):
@@ -768,7 +783,7 @@ class DeviceSegmentationApp:
         yy, xx = np.ogrid[:H, :W]
         central_roi = (yy - cyi) ** 2 + (xx - cxi) ** 2 <= r**2
 
-        thresh = threshold_otsu(inverted)
+        thresh = threshold_yen(inverted)
         labelled = label(inverted > thresh)
         props = regionprops(labelled)
         if len(props) == 0:
@@ -782,7 +797,7 @@ class DeviceSegmentationApp:
 
         best_prop = min(props, key=score)
         if (best_prop.area > xy_area * self.mask_frac_thresh) or (best_prop.solidity < 0.5):
-            thresh = threshold_triangle(inverted)
+            thresh = threshold_otsu(inverted)
             labelled = label(inverted > thresh)
             props = regionprops(labelled)
             if len(props) == 0:
@@ -955,6 +970,8 @@ class DeviceSegmentationApp:
 
         edges = reconstructed = reconstructed_mask = None
         new_corners = new_angle_rad = new_centroid_xy = None
+        rescue_closed_mask = None
+        rescue_radius = None
 
         corners, angle_rad, centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(device_mask)
         # Check if device mask itself touches the image border (more reliable
@@ -967,32 +984,66 @@ class DeviceSegmentationApp:
         )
         if corners is None or self._corners_touch_border(corners, device_mask.shape, margin=5) or mask_touches_border:
             flag = True
-            self._hough_fallback_used = True
             if corners is None:
                 reason = "corners is None"
             elif mask_touches_border:
                 reason = "device mask touches image border"
             else:
                 reason = "corners touch border"
-            print(f"  [Hough fallback] Primary device detection failed ({reason}) — using probabilistic Hough lines")
-            edges = remove_small_objects(labels_to_dilate > 0)
-            segs = probabilistic_hough_line(
-                edges,
-                line_length=self.line_length,
-                line_gap=self.line_gap,
-                threshold=self.hough_threshold,
-            )
-            reconstructed = np.zeros_like(edges, dtype=bool)
-            for (x0, y0), (x1, y1) in segs:
-                rr, cc = line(y0, x0, y1, x1)
-                reconstructed[rr, cc] = True
 
-            reconstructed_mask = np.logical_or(reconstructed, post_dilation_mask)
-            updated_clean_labels = label(~reconstructed_mask)
-            props = regionprops(updated_clean_labels)
-            largest_prop = max(props, key=lambda p: p.area)
-            new_device_mask = updated_clean_labels == largest_prop.label
-            new_corners, new_angle_rad, new_centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(new_device_mask)
+            # Step 1: Dilation rescue — seal small border gaps with progressively
+            # larger disk structuring elements before falling back to Hough.
+            # If dilating post_dilation_mask produces a region that is fully
+            # interior (doesn't touch any image border), use it as the device.
+            rescued = False
+            for dil_radius in (3, 6, 10):
+                closed = binary_dilation(post_dilation_mask.astype(bool),
+                                         structure=disk(dil_radius))
+                clab = label(~closed)
+                cprops = regionprops(clab)
+                if not cprops:
+                    continue
+                ch, cw = closed.shape
+                non_border = [
+                    p for p in cprops
+                    if p.bbox[0] > 0 and p.bbox[1] > 0
+                    and p.bbox[2] < ch and p.bbox[3] < cw
+                ]
+                if not non_border:
+                    continue
+                best_c = max(non_border, key=lambda p: p.area)
+                rescue_mask = clab == best_c.label
+                rc, ra, rce = self._oriented_rect_corners_crop_necks_and_flares(rescue_mask)
+                if rc is not None and not self._corners_touch_border(rc, rescue_mask.shape, margin=5):
+                    new_corners, new_angle_rad, new_centroid_xy = rc, ra, rce
+                    rescue_closed_mask = closed
+                    rescue_radius = dil_radius
+                    print(f"  [Dilation rescue] Sealed border gaps with disk({dil_radius}) — skipping Hough ({reason})")
+                    rescued = True
+                    break
+
+            # Step 2: Hough fallback — only if dilation rescue failed.
+            if not rescued:
+                self._hough_fallback_used = True
+                print(f"  [Hough fallback] Primary device detection failed ({reason}) — using probabilistic Hough lines")
+                edges = remove_small_objects(labels_to_dilate > 0)
+                segs = probabilistic_hough_line(
+                    edges,
+                    line_length=self.line_length,
+                    line_gap=self.line_gap,
+                    threshold=self.hough_threshold,
+                )
+                reconstructed = np.zeros_like(edges, dtype=bool)
+                for (x0, y0), (x1, y1) in segs:
+                    rr, cc = line(y0, x0, y1, x1)
+                    reconstructed[rr, cc] = True
+
+                reconstructed_mask = np.logical_or(reconstructed, post_dilation_mask)
+                updated_clean_labels = label(~reconstructed_mask)
+                props = regionprops(updated_clean_labels)
+                largest_prop = max(props, key=lambda p: p.area)
+                new_device_mask = updated_clean_labels == largest_prop.label
+                new_corners, new_angle_rad, new_centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(new_device_mask)
 
         if flag:
             final_corners = new_corners
@@ -1017,6 +1068,8 @@ class DeviceSegmentationApp:
                 "edges": edges,
                 "reconstructed": reconstructed,
                 "reconstructed_mask": reconstructed_mask,
+                "rescue_closed_mask": rescue_closed_mask,
+                "rescue_radius": rescue_radius,
                 "flag": flag,
                 "final_corners": final_corners,
                 "final_centroid_xy": final_centroid_xy,
