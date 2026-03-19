@@ -614,13 +614,15 @@ def build_internal_pore_label_volumes(
 # ---------------------------------------------------------------------------
 
 def generate_skeleton_overview_plot(segmentation, analysis_results, title="", save_path=None,
-                                    brightfield_stack=None, organoid_mask_xy=None):
-    """Generate and optionally save the 5-panel skeleton/graph overview plot.
+                                    brightfield_stack=None, organoid_mask_xy=None,
+                                    brightfield_full=None, device_corners_xy=None,
+                                    organoid_mask_full_xy=None):
+    """Generate and optionally save the 6-panel skeleton/graph overview plot.
 
-    Panels: (0) brightfield input with organoid mask and device boundary overlay,
-    (1) full skeleton overlay, (2) clean skeleton overlay,
-    (3) graph from clean skeleton with diameter colouring,
-    (4) pruned clean graph with diameter colouring.
+    Panels: (0) full XY plane with device geometry and tumour overlay,
+    (1) cropped brightfield (no overlay), (2) reconstructed vasculature sum projection,
+    (3) full skeleton overlay, (4) clean skeleton overlay,
+    (5) pruned clean graph.
     """
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm
@@ -635,24 +637,27 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
     nz = segmentation.shape[0]
     seg_bool = segmentation.astype(bool)
     seg_max = np.mean(seg_bool, axis=0).astype(np.float32)
+
+    # Zero out tumour/organoid region on all segmentation-based panels
+    if organoid_mask_xy is not None:
+        org_mask = np.asarray(organoid_mask_xy, dtype=bool)
+        if org_mask.shape == seg_max.shape:
+            seg_max = seg_max.copy()
+            seg_max[org_mask] = 0.0
+
     background = np.stack([seg_max * 0.40] * 3, axis=-1)
+
+    _SKEL_COLOUR = np.array([0.0, 1.0, 1.0])  # cyan
 
     def _make_overlay(seg_bg, arr):
         thick = maximum_filter(np.sum(arr.astype(np.float32), axis=0), size=3)
-        norm = thick / max(thick.max(), 1)
         rgb = np.stack([seg_bg * 0.40] * 3, axis=-1)
-        mask = norm > 0
-        rgb[mask] = cm.get_cmap('cool')(norm[mask])[:, :3]
+        mask = thick > 0
+        rgb[mask] = _SKEL_COLOUR  # full-brightness cyan wherever skeleton is present
         return np.clip(rgb, 0, 1)
 
     overlay_skel = _make_overlay(seg_max, skeleton)
     overlay_clean = _make_overlay(seg_max, clean_skeleton)
-
-    # Build a graph from the clean skeleton image for display
-    raw_graph = sknw.build_sknw(clean_skeleton.astype(bool))
-    for _n in list(raw_graph.nodes()):
-        if raw_graph.nodes[_n]['pts'].ndim > 1:
-            raw_graph.nodes[_n]['pts'] = raw_graph.nodes[_n]['pts'][0]
 
     def _edge_diameters(g):
         diams = []
@@ -667,10 +672,9 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
                 diams.append(0.0)
         return diams
 
-    raw_diams = _edge_diameters(raw_graph)
     clean_diams = _edge_diameters(clean_graph)
 
-    all_diams = [d for d in raw_diams + clean_diams if d > 0]
+    all_diams = [d for d in clean_diams if d > 0]
     vmin = np.percentile(all_diams, 5) * 0.5 if all_diams else 0
     vmax = np.percentile(all_diams, 95) if all_diams else 1
     norm_g = Normalize(vmin=vmin, vmax=vmax)
@@ -692,47 +696,64 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
                 pos = pos[0]
             nx_x.append(pos[2])
             nx_y.append(pos[1])
-            nc.append('lime' if g.degree(node) == 1 else 'white')
+            nc.append('limegreen' if g.degree(node) == 1 else 'white')
         if nx_x:
-            ax.scatter(nx_x, nx_y, c=nc, s=20, alpha=0.8, zorder=5)
+            ax.scatter(nx_x, nx_y, c=nc, s=12, alpha=0.9, zorder=5)
         ax.set_title(f'{graph_title}\n({g.number_of_nodes()} nodes, {g.number_of_edges()} edges)',
                      fontsize=13)
         ax.set_aspect('equal', adjustable='box')
 
     plt.style.use('dark_background')
-    fig, ax = plt.subplots(ncols=5, figsize=(30, 16))
+    fig, ax = plt.subplots(ncols=6, figsize=(36, 16))
 
-    # ── Panel 0: brightfield input with organoid mask + device boundary ──────
-    if brightfield_stack is not None:
-        bf_2d = np.mean(brightfield_stack.astype(np.float32), axis=0)
-        bf_min, bf_max = bf_2d.min(), bf_2d.max()
-        bf_norm = (bf_2d - bf_min) / max(float(bf_max - bf_min), 1e-6)
-        rgb_bf = np.stack([bf_norm] * 3, axis=-1)
-        if organoid_mask_xy is not None:
-            mask = np.asarray(organoid_mask_xy, dtype=bool)
-            if mask.shape == bf_2d.shape:
-                rgb_bf[mask] = rgb_bf[mask] * 0.3 + np.array([0.0, 0.8, 0.8]) * 0.7
-        ax[0].imshow(np.clip(rgb_bf, 0, 1))
-        H, W = bf_2d.shape
-        border_x = [1, W - 2, W - 2, 1, 1]
-        border_y = [1, 1, H - 2, H - 2, 1]
-        ax[0].plot(border_x, border_y, color='yellow', linewidth=2, label='device boundary')
-        ax[0].legend(fontsize=8, loc='upper right')
-        bf_title = 'Brightfield input'
-        if organoid_mask_xy is not None:
-            bf_title += '\n(organoid mask, teal)'
-        ax[0].set_title(bf_title, fontsize=13)
+    # ── Panel 0: full XY plane with device corners + tumour overlay ──────────
+    if brightfield_full is not None:
+        bf_full = np.asarray(brightfield_full, dtype=np.float32)
+        if bf_full.ndim == 3:
+            bf_full = np.mean(bf_full, axis=-1)
+        bfmin, bfmax = bf_full.min(), bf_full.max()
+        bf_norm = (bf_full - bfmin) / max(float(bfmax - bfmin), 1e-6)
+        rgb_full = np.stack([bf_norm] * 3, axis=-1)
+        if organoid_mask_full_xy is not None:
+            omask = np.asarray(organoid_mask_full_xy, dtype=bool)
+            if omask.shape == bf_full.shape:
+                rgb_full[omask] = rgb_full[omask] * 0.5 + np.array([1.0, 0.0, 0.0]) * 0.5
+        ax[0].imshow(np.clip(rgb_full, 0, 1))
+        if device_corners_xy is not None:
+            corners = np.asarray(device_corners_xy)
+            closed = np.vstack([corners, corners[0:1]])
+            ax[0].plot(closed[:, 0], closed[:, 1], color='yellow', linewidth=2)
+        p0_title = 'Full plane + device geometry'
+        if organoid_mask_full_xy is not None:
+            p0_title += '\n(tumour mask, red)'
+        ax[0].set_title(p0_title, fontsize=13)
     else:
         ax[0].axis('off')
 
-    ax[1].imshow(overlay_skel)
-    ax[1].set_title(f'Skeleton  ({int(skeleton.sum()):,} voxels,  {nz} z-slices)', fontsize=13)
+    # ── Panel 1: cropped brightfield, no overlay ─────────────────────────────
+    if brightfield_stack is not None:
+        bf_2d = np.mean(brightfield_stack.astype(np.float32), axis=0)
+        bf_min, bf_max = bf_2d.min(), bf_2d.max()
+        bf_norm2 = (bf_2d - bf_min) / max(float(bf_max - bf_min), 1e-6)
+        ax[1].imshow(bf_norm2, cmap='gray')
+        ax[1].set_title('Cropped brightfield', fontsize=13)
+    else:
+        ax[1].axis('off')
 
-    ax[2].imshow(overlay_clean)
-    ax[2].set_title(f'Clean skeleton  ({int(clean_skeleton.sum()):,} voxels,  {nz} z-slices)', fontsize=13)
+    # ── Panel 2: reconstructed vasculature sum projection ────────────────────
+    ax[2].imshow(seg_max, cmap='gray')
+    ax[2].set_title(f'Reconstructed vasculature  ({nz} z-slices)', fontsize=13)
 
-    _draw_graph(ax[3], raw_graph, raw_diams, 'Graph (clean skeleton)')
-    _draw_graph(ax[4], clean_graph, clean_diams, 'Clean graph (pruned)')
+    # ── Panel 3: full skeleton overlaid on segmentation ──────────────────────
+    ax[3].imshow(overlay_skel)
+    ax[3].set_title(f'Skeleton  ({int(skeleton.sum()):,} voxels)', fontsize=13)
+
+    # ── Panel 4: clean skeleton overlaid on segmentation ─────────────────────
+    ax[4].imshow(overlay_clean)
+    ax[4].set_title(f'Clean skeleton  ({int(clean_skeleton.sum()):,} voxels)', fontsize=13)
+
+    # ── Panel 5: pruned clean graph ───────────────────────────────────────────
+    _draw_graph(ax[5], clean_graph, clean_diams, 'Clean graph (pruned)')
 
     fig.colorbar(sm, ax=ax[-1], fraction=0.02, pad=0.02, label='Vessel diameter (\u00b5m)')
     for a in ax:

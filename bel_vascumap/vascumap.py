@@ -432,6 +432,7 @@ class VascuMap:
         self.skeletonisation_and_analysis()
 
         # ── Skeleton overview plot ────────────────────────────────────────
+        _app_debug = getattr(self.app, '_last_segment_debug', None) or {}
         generate_skeleton_overview_plot(
             self.vessel_mask_iso,
             self.analysis_results,
@@ -439,6 +440,9 @@ class VascuMap:
             save_path=str(out / f"{name_prefix}_skeleton_overview.png"),
             brightfield_stack=self.cropped_stack,
             organoid_mask_xy=self.cropped_organoid_mask_xy,
+            brightfield_full=getattr(self.app, '_last_image', None),
+            device_corners_xy=_app_debug.get('final_corners'),
+            organoid_mask_full_xy=getattr(self.app, '_last_organoid_region', None),
         )
         print(f"  Skeleton overview → {name_prefix}_skeleton_overview.png")
 

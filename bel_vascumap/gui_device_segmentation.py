@@ -167,7 +167,7 @@ class DeviceSegmentationApp:
         bin_size: float = 2.0,
         min_run_frac: float = 0.25,
         typical_pct: float = 50.0,
-        line_length: int = 400,
+        line_length: int = 500,
         line_gap: int = 200,
         hough_threshold: int = 70,
         mask_sigma: float = 2.0,
