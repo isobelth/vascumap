@@ -272,6 +272,107 @@ def graph2image(graph, shape):
     return pruned_skeleton
 
 
+def _orientation_to_device_axis_deg(pts_um, device_axis='x'):
+    """Return acute branch orientation angle (deg) relative to device axis in XY plane.
+
+    The device segmentation step rectifies/crops to the device frame, so the
+    device long axis is treated as the +X axis in this aligned space.
+    """
+    if pts_um is None or len(pts_um) < 2:
+        return np.nan
+
+    vec = np.asarray(pts_um[-1] - pts_um[0], dtype=float)
+    # XY plane in array coordinates is (x, y) -> indices (2, 1)
+    vec_xy = np.asarray([vec[2], vec[1]], dtype=float)
+    norm = float(np.linalg.norm(vec_xy))
+    if not np.isfinite(norm) or norm <= 1e-8:
+        return np.nan
+
+    unit = vec_xy / norm
+    axis_xy = np.array([1.0, 0.0], dtype=float) if str(device_axis).lower() == 'x' else np.array([0.0, 1.0], dtype=float)
+    dot = float(np.clip(np.abs(np.dot(unit, axis_xy)), -1.0, 1.0))
+    # Acute angle to axis: 0° aligned, 90° orthogonal
+    return float(np.degrees(np.arccos(dot)))
+
+
+def compute_branch_metrics_df(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), device_axis='x'):
+    """Compute per-branch metrics DataFrame from a cleaned vessel graph."""
+    voxel_size_um = np.asarray(voxel_size_um, dtype=float)
+    rows = []
+
+    for u, v in graph.edges():
+        try:
+            pts = np.asarray(graph[u][v]['pts'])
+            if pts.ndim != 2 or pts.shape[0] < 2:
+                continue
+
+            pts = pts.astype(int)
+            pts_um = pts.astype(float) * voxel_size_um[None, :]
+            seg_len_um = np.linalg.norm(np.diff(pts_um, axis=0), axis=1)
+            path_length_um = float(np.sum(seg_len_um))
+            endpoint_distance_um = float(np.linalg.norm(pts_um[-1] - pts_um[0]))
+
+            seg_areas_um2 = np.asarray(area_image[pts[:, 0], pts[:, 1], pts[:, 2]], dtype=float)
+            mean_cs_area_um2 = float(np.nanmean(seg_areas_um2)) if seg_areas_um2.size else np.nan
+            median_cs_area_um2 = float(np.nanmedian(seg_areas_um2)) if seg_areas_um2.size else np.nan
+            std_cs_area_um2 = float(np.nanstd(seg_areas_um2)) if seg_areas_um2.size else np.nan
+
+            # Equivalent circular width from area
+            valid_area = seg_areas_um2[np.isfinite(seg_areas_um2) & (seg_areas_um2 > 0)]
+            if valid_area.size:
+                eq_widths_um = np.sqrt((4.0 * valid_area) / np.pi)
+                mean_width_um = float(np.nanmean(eq_widths_um))
+                median_width_um = float(np.nanmedian(eq_widths_um))
+            else:
+                mean_width_um = np.nan
+                median_width_um = np.nan
+
+            # Volume approximation from path length and mean cross-sectional area
+            branch_volume_um3 = float(mean_cs_area_um2 * path_length_um) if np.isfinite(mean_cs_area_um2) else np.nan
+
+            row = {
+                'node_start': int(u),
+                'node_end': int(v),
+                'is_sprout': bool(graph.nodes[u].get('sprout', False) or graph.nodes[v].get('sprout', False)),
+                'start_z': int(pts[0, 0]),
+                'start_y': int(pts[0, 1]),
+                'start_x': int(pts[0, 2]),
+                'end_z': int(pts[-1, 0]),
+                'end_y': int(pts[-1, 1]),
+                'end_x': int(pts[-1, 2]),
+                'start_z_um': float(pts_um[0, 0]),
+                'start_y_um': float(pts_um[0, 1]),
+                'start_x_um': float(pts_um[0, 2]),
+                'end_z_um': float(pts_um[-1, 0]),
+                'end_y_um': float(pts_um[-1, 1]),
+                'end_x_um': float(pts_um[-1, 2]),
+                'path_length_um': path_length_um,
+                'endpoint_distance_um': endpoint_distance_um,
+                'mean_cs_area_um2': mean_cs_area_um2,
+                'median_cs_area_um2': median_cs_area_um2,
+                'std_cs_area_um2': std_cs_area_um2,
+                'mean_width_um': mean_width_um,
+                'median_width_um': median_width_um,
+                'branch_volume_um3': branch_volume_um3,
+                'orientation_to_device_axis_deg': _orientation_to_device_axis_deg(pts_um, device_axis=device_axis),
+            }
+            rows.append(row)
+        except (KeyError, IndexError, ValueError):
+            continue
+
+    if not rows:
+        return pd.DataFrame(columns=[
+            'node_start', 'node_end', 'is_sprout',
+            'start_z', 'start_y', 'start_x', 'end_z', 'end_y', 'end_x',
+            'start_z_um', 'start_y_um', 'start_x_um', 'end_z_um', 'end_y_um', 'end_x_um',
+            'path_length_um', 'endpoint_distance_um',
+            'mean_cs_area_um2', 'median_cs_area_um2', 'std_cs_area_um2',
+            'mean_width_um', 'median_width_um', 'branch_volume_um3',
+            'orientation_to_device_axis_deg',
+        ])
+    return pd.DataFrame(rows)
+
+
 # ---------------------------------------------------------------------------
 # Network headline metrics
 # ---------------------------------------------------------------------------
@@ -279,8 +380,8 @@ def graph2image(graph, shape):
 def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), distance_mode='skeleton'):
     voxel_size_um = np.asarray(voxel_size_um, dtype=float)
     summary = {
-        'median_sprout_and_branch_tortuosity': np.nan,
-        'p90_minus_p10_sprout_and_branch_tortuosity': np.nan,
+        'median_sprout_and_branch_orientation_deg': np.nan,
+        'p90_minus_p10_sprout_and_branch_orientation_deg': np.nan,
         'median_sprout_and_branch_median_cs_area_um2': np.nan,
         'p90_minus_p10_sprout_and_branch_median_cs_area_um2': np.nan,
         'median_junction_dist_nearest_junction_um': np.nan,
@@ -289,7 +390,7 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
         'p90_minus_p10_sprout_dist_nearest_endpoint_um': np.nan,
     }
 
-    tortuosities = []
+    orientations_deg = []
     median_cs_areas = []
     for u, v in graph.edges():
         try:
@@ -297,19 +398,16 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
             if len(pts) < 2:
                 continue
             pts_um = np.asarray(pts, dtype=float) * voxel_size_um[None, :]
-            segment_lengths_um = np.linalg.norm(np.diff(pts_um, axis=0), axis=1)
-            length_um = float(np.sum(segment_lengths_um))
-            shortest_path_um = float(np.linalg.norm(pts_um[0] - pts_um[-1]))
-            tortuosities.append(np.clip(length_um / (shortest_path_um + 1e-8), 0, 5))
+            orientations_deg.append(_orientation_to_device_axis_deg(pts_um, device_axis='x'))
 
             segment_areas = area_image[pts[:, 0], pts[:, 1], pts[:, 2]]
             median_cs_areas.append(float(np.nanmedian(segment_areas)))
         except (KeyError, IndexError):
             continue
 
-    if len(tortuosities) > 0:
-        summary['median_sprout_and_branch_tortuosity'] = safe_median(tortuosities)
-        summary['p90_minus_p10_sprout_and_branch_tortuosity'] = safe_percentile_spread(tortuosities)
+    if len(orientations_deg) > 0:
+        summary['median_sprout_and_branch_orientation_deg'] = safe_median(orientations_deg)
+        summary['p90_minus_p10_sprout_and_branch_orientation_deg'] = safe_percentile_spread(orientations_deg)
     if len(median_cs_areas) > 0:
         summary['median_sprout_and_branch_median_cs_area_um2'] = safe_median(median_cs_areas)
         summary['p90_minus_p10_sprout_and_branch_median_cs_area_um2'] = safe_percentile_spread(median_cs_areas)
@@ -750,14 +848,21 @@ def clean_and_analyse(
     global_metrics['junctions_per_vessel_length_um_inverse'] = safe_divide(branchpoints_count, total_vessel_length_um)
     global_metrics['skeleton_fractal_dimension'] = fd
     global_metrics['skeleton_lacunarity'] = lacunarity
-    global_metrics['median_sprout_and_branch_tortuosity'] = np.nan
-    global_metrics['p90_minus_p10_sprout_and_branch_tortuosity'] = np.nan
+    global_metrics['median_sprout_and_branch_orientation_deg'] = np.nan
+    global_metrics['p90_minus_p10_sprout_and_branch_orientation_deg'] = np.nan
     global_metrics['median_sprout_and_branch_median_cs_area_um2'] = np.nan
     global_metrics['p90_minus_p10_sprout_and_branch_median_cs_area_um2'] = np.nan
     global_metrics['median_junction_dist_nearest_junction_um'] = np.nan
     global_metrics['p90_minus_p10_junction_dist_nearest_junction_um'] = np.nan
     global_metrics['median_sprout_dist_nearest_endpoint_um'] = np.nan
     global_metrics['p90_minus_p10_sprout_dist_nearest_endpoint_um'] = np.nan
+
+    branch_metrics_df = compute_branch_metrics_df(
+        clean_graph,
+        area_image,
+        voxel_size_um=voxel_size_um,
+        device_axis='x',
+    )
 
     if clean_graph.number_of_nodes() > 0 and clean_graph.number_of_edges() > 0:
         global_metrics.update(
@@ -768,6 +873,12 @@ def clean_and_analyse(
                 distance_mode=junction_distance_mode,
             )
         )
+
+    global_metrics['average_vessel_volume_um3'] = (
+        float(np.nanmean(branch_metrics_df['branch_volume_um3'].to_numpy(dtype=float)))
+        if not branch_metrics_df.empty
+        else np.nan
+    )
 
     pore_global_metrics = compute_internal_pore_headline_metrics(
         clean_segmentation.astype(bool),
@@ -791,6 +902,7 @@ def clean_and_analyse(
     return {
         'global_metrics': global_metrics,
         'global_metrics_df': global_metrics_df,
+        'branch_metrics_df': branch_metrics_df,
         'voxel_size_um': voxel_size_um,
         'chunk_size': chunk_size,
         'clean_segmentation': clean_segmentation,

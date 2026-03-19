@@ -1,6 +1,7 @@
 from typing import Literal, Dict, List
 import argparse
 import numpy as np
+import pandas as pd
 import napari
 import math
 from pathlib import Path
@@ -448,6 +449,23 @@ class VascuMap:
         metrics_df.insert(2, 'image_index', int(self.image_index))
         metrics_df.to_csv(str(out / f"{name_prefix}_analysis_metrics.csv"), index=False)
         print(f"  Metrics → {name_prefix}_analysis_metrics.csv")
+
+        # ── Branch-level metrics CSV (always saved) ──────────────────────
+        branch_df = ar.get('branch_metrics_df', pd.DataFrame()).copy()
+        if branch_df is not None and not branch_df.empty:
+            branch_df.insert(0, 'image_name', name_prefix)
+            branch_df.insert(1, 'source_file', src.name if src else '')
+            branch_df.insert(2, 'image_index', int(self.image_index))
+            branch_df.to_csv(str(out / f"{name_prefix}_branch_metrics.csv"), index=False)
+            print(f"  Branch metrics → {name_prefix}_branch_metrics.csv")
+        else:
+            # still write an empty schema-consistent file for downstream joins
+            branch_df = branch_df if isinstance(branch_df, pd.DataFrame) else pd.DataFrame()
+            branch_df.insert(0, 'image_name', name_prefix)
+            branch_df.insert(1, 'source_file', src.name if src else '')
+            branch_df.insert(2, 'image_index', int(self.image_index))
+            branch_df.to_csv(str(out / f"{name_prefix}_branch_metrics.csv"), index=False)
+            print(f"  Branch metrics → {name_prefix}_branch_metrics.csv (empty)")
 
         # ── Extra outputs for full napari visualisation ───────────────────
         if save_all_interim:

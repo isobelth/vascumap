@@ -7,7 +7,7 @@ import napari
 from magicgui import magicgui
 from magicgui.widgets import Container, TextEdit
 from skimage import util
-from skimage.filters import threshold_triangle, median, sobel, gaussian, threshold_yen
+from skimage.filters import threshold_triangle, median, sobel, gaussian, threshold_yen, threshold_otsu
 from skimage.measure import label, regionprops_table, regionprops, moments_central
 from skimage.morphology import disk, remove_small_objects, remove_small_holes, closing
 from skimage.transform import ProjectiveTransform, warp, probabilistic_hough_line
@@ -369,6 +369,32 @@ class DeviceSegmentationApp:
 
         overlay = np.stack([base_u8, base_u8, base_u8], axis=-1)
 
+        def draw_mask(mask_xy, rgb=(0, 255, 255), alpha=0.55):
+            if mask_xy is None:
+                return
+            mask_xy = np.asarray(mask_xy, dtype=bool)
+            if mask_xy.size == 0:
+                return
+            if mask_xy.shape != overlay.shape[:2]:
+                return
+            if not np.any(mask_xy):
+                return
+
+            base_float = overlay[mask_xy].astype(np.float32)
+            tint = np.array(rgb, dtype=np.float32)
+            blended = (1.0 - float(alpha)) * base_float + float(alpha) * tint
+            overlay[mask_xy] = np.clip(blended, 0, 255).astype(np.uint8)
+
+            # Add a strong contour so the region is visible on bright backgrounds.
+            try:
+                eroded = ndi.binary_erosion(mask_xy, structure=np.ones((3, 3), dtype=bool))
+                boundary = mask_xy & ~eroded
+                overlay[boundary, 0] = int(rgb[0])
+                overlay[boundary, 1] = int(rgb[1])
+                overlay[boundary, 2] = int(rgb[2])
+            except Exception:
+                pass
+
         def draw_corners(corners_yx, rgb):
             if corners_yx is None:
                 return
@@ -396,6 +422,12 @@ class DeviceSegmentationApp:
 
         draw_corners(inner_corners_yx, (255, 0, 0))
         draw_corners(outer_corners_yx, (255, 255, 0))
+
+        # Prefer cached mask, fallback to debug snapshot if needed.
+        organoid_mask = self._last_organoid_region
+        if organoid_mask is None and self._last_segment_debug is not None:
+            organoid_mask = self._last_segment_debug.get("organoid_region", None)
+        draw_mask(organoid_mask, rgb=(0, 255, 255), alpha=0.55)
 
         hough_tag = "_hough" if self._hough_fallback_used else ""
         overlay_path = out_dir / f"{name_prefix}_overlay_geometry{hough_tag}_{int(run_suffix)}.tif"
@@ -736,7 +768,7 @@ class DeviceSegmentationApp:
         yy, xx = np.ogrid[:H, :W]
         central_roi = (yy - cyi) ** 2 + (xx - cxi) ** 2 <= r**2
 
-        thresh = threshold_yen(inverted)
+        thresh = threshold_otsu(inverted)
         labelled = label(inverted > thresh)
         props = regionprops(labelled)
         if len(props) == 0:
