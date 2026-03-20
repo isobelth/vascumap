@@ -170,7 +170,7 @@ class DeviceSegmentationApp:
         line_length: int = 500,
         line_gap: int = 400,
         hough_threshold: int = 70,
-        mask_sigma: float = 2.0,
+        mask_sigma: float = 5.0,
         mask_frac_thresh: float = 0.40,
     ):
         self.enable_gui = bool(enable_gui)
@@ -222,6 +222,7 @@ class DeviceSegmentationApp:
         self.image_name = None
         self._mask_central_region_enabled = False
         self._last_organoid_region = None
+        self._last_organoid_debug = None
         self._cropped_organoid_mask_xy_raw = None
 
 
@@ -319,7 +320,7 @@ class DeviceSegmentationApp:
         image_source: Path,
         image_index: int = 0,
         device_width_um: float = 35.0,
-        mask_central_region: bool = False,
+        mask_central_region = False,
     ):
         source = Path(image_source)
         self._list_images(source)
@@ -436,6 +437,9 @@ class DeviceSegmentationApp:
         if debug_flag := (self._last_segment_debug or {}).get("flag", False):
             self._save_segmentation_diagnostic_plot(name_prefix, out_dir)
 
+        if self._last_organoid_debug is not None:
+            self._save_organoid_debug_plot(name_prefix, out_dir)
+
         return overlay_path
 
     def _save_segmentation_diagnostic_plot(self, name_prefix: str, out_dir: Path):
@@ -520,6 +524,94 @@ class DeviceSegmentationApp:
         fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
         plt.close(fig)
         print(f"  Segmentation diagnostic plot → {save_path.name}")
+
+    def _save_organoid_debug_plot(self, name_prefix: str, out_dir: Path):
+        """Save a multi-panel diagnostic PNG showing all organoid segmentation
+        steps: pre/post clipping and the binary + chosen region at each attempt."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        dbg = self._last_organoid_debug
+        if dbg is None:
+            return
+
+        _step1_label = {
+            "threshold_minimum_on_raw": "Step 1: threshold_minimum (raw)",
+            "threshold_minimum_on_clipped": "Step 1: threshold_minimum (clipped — raw failed)",
+            "otsu_on_clipped": "Step 1: Otsu (clipped — threshold_minimum failed)",
+        }.get(dbg.get("step1_method"), "Step 1")
+
+        def _frac(key):
+            f = dbg.get(key)
+            return f"  ({f:.1%})" if f is not None else ""
+
+        _processed_label = (
+            "Gaussian only / no inversion (light mode, pre-clip)"
+            if dbg.get("mode") == "light"
+            else "Inverted + Gaussian (dark mode, pre-clip)"
+        )
+        panels = [
+            ("In-focus plane", dbg.get("in_focus_plane"), "gray"),
+            (_processed_label, dbg.get("processed"), "gray"),
+        ]
+        if dbg.get("clipped") is not None:
+            panels.append(("Clipped (post-clip)", dbg.get("clipped"), "gray"))
+
+        panels += [
+            (f"{_step1_label}{_frac('step1_area_frac')}\nbinary",
+             dbg.get("step1_binary"), "gray"),
+            (f"{_step1_label}{_frac('step1_area_frac')}\nbest region",
+             dbg.get("step1_region"), "gray"),
+        ]
+
+        if dbg.get("step2_triggered"):
+            panels += [
+                (f"Step 2: threshold_minimum (clipped){_frac('step2_area_frac')}\nbinary",
+                 dbg.get("step2_binary"), "gray"),
+                (f"Step 2: threshold_minimum (clipped){_frac('step2_area_frac')}\nbest region",
+                 dbg.get("step2_region"), "gray"),
+            ]
+
+        if dbg.get("step3_triggered"):
+            panels += [
+                (f"Step 3: Otsu fallback{_frac('step3_area_frac')}\nbinary",
+                 dbg.get("step3_binary"), "gray"),
+                (f"Step 3: Otsu fallback{_frac('step3_area_frac')}\nbest region",
+                 dbg.get("step3_region"), "gray"),
+            ]
+
+        panels.append(("Final organoid mask (pre-morphology)", dbg.get("final_region"), "gray"))
+
+        panels = [(t, img, cm) for t, img, cm in panels if img is not None]
+        n = len(panels)
+        if n == 0:
+            return
+
+        ncols = min(n, 4)
+        nrows = (n + ncols - 1) // ncols
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows))
+        if nrows * ncols == 1:
+            axes = np.array([axes])
+        axes = np.atleast_2d(axes)
+
+        for idx, (title, img, cmap) in enumerate(panels):
+            r, c = divmod(idx, ncols)
+            axes[r, c].imshow(np.asarray(img), cmap=cmap, aspect="equal")
+            axes[r, c].set_title(title, fontsize=9)
+            axes[r, c].axis("off")
+
+        for idx in range(n, nrows * ncols):
+            r, c = divmod(idx, ncols)
+            axes[r, c].axis("off")
+
+        fig.suptitle(f"Organoid segmentation debug — {name_prefix}", fontsize=13)
+        plt.tight_layout()
+        save_path = Path(out_dir) / f"{name_prefix}_organoid_debug.png"
+        fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Organoid debug plot → {save_path.name}")
 
     # -------- Focus helpers (integrated; no separate class) --------
     def _to_gray(self, im):
@@ -769,13 +861,29 @@ class DeviceSegmentationApp:
         y = corners_xy[:, 1]
         return (x <= margin).any() or (x >= (W - 1 - margin)).any() or (y <= margin).any() or (y >= (H - 1 - margin)).any()
 
-    def _mask_out_organoid(self, in_focus_plane):
-        inverted = gaussian(
-            util.invert(np.asarray(in_focus_plane, dtype=np.float32)),
-            sigma=float(self.mask_sigma),
-            mode="nearest",
-            preserve_range=True,
-        ).astype(np.float32)
+    def _mask_out_organoid(self, in_focus_plane, mode: str = "dark"):
+        """Segment the central organoid region.
+
+        Parameters
+        ----------
+        mode : "dark" | "light"
+            "dark"  — organoid is dark in brightfield; image is inverted before
+                      thresholding so the organoid becomes the bright foreground.
+            "light" — organoid is bright in brightfield; no inversion needed.
+        """
+        raw = np.asarray(in_focus_plane, dtype=np.float32)
+        if mode == "light":
+            # Organoid is already bright — smooth only, no inversion.
+            processed = gaussian(raw, sigma=float(self.mask_sigma), mode="nearest", preserve_range=True).astype(np.float32)
+        else:
+            # Organoid is dark — invert so it becomes bright, then smooth.
+            processed = gaussian(
+                util.invert(raw),
+                sigma=float(self.mask_sigma),
+                mode="nearest",
+                preserve_range=True,
+            ).astype(np.float32)
+
         H, W = in_focus_plane.shape[:2]
         xy_area = H * W
         cyi, cxi = H // 2, W // 2
@@ -783,7 +891,11 @@ class DeviceSegmentationApp:
         yy, xx = np.ogrid[:H, :W]
         central_roi = (yy - cyi) ** 2 + (xx - cxi) ** 2 <= r**2
 
-        inverted = np.nan_to_num(inverted, nan=0.0, posinf=0.0, neginf=0.0)
+        processed = np.nan_to_num(processed, nan=0.0, posinf=0.0, neginf=0.0)
+        # Alias used throughout the rest of the function (kept for clarity)
+        inverted = processed
+
+        clipped_inverted = None  # computed at most once and reused
 
         def _try_threshold_minimum(img):
             try:
@@ -793,7 +905,7 @@ class DeviceSegmentationApp:
 
         def _clip_dark(img):
             """Raise the floor of the inverted image to suppress dark-end noise."""
-            p5 = float(np.percentile(img, 5))
+            p5 = float(np.percentile(img, 15))
             return np.clip(img, p5, None)
 
         def score(p):
@@ -802,44 +914,92 @@ class DeviceSegmentationApp:
             dist2 = (py - cyi) ** 2 + (px - cxi) ** 2
             return (-overlap, dist2)
 
+        # Debug accumulator — populated as each step runs
+        dbg = {
+            "in_focus_plane": np.asarray(in_focus_plane),
+            "mode": mode,
+            "processed": inverted.copy(),
+            "clipped": None,
+            "step1_method": None,
+            "step1_binary": None,
+            "step1_region": None,
+            "step1_area_frac": None,
+            "step2_triggered": False,
+            "step2_method": None,
+            "step2_binary": None,
+            "step2_region": None,
+            "step2_area_frac": None,
+            "step3_triggered": False,
+            "step3_binary": None,
+            "step3_region": None,
+            "step3_area_frac": None,
+            "final_region": None,
+        }
+
         # Step 1: threshold_minimum on the raw inverted image.
         img_to_thresh = inverted
         thresh = _try_threshold_minimum(img_to_thresh)
         if thresh is None:
-            img_to_thresh = _clip_dark(inverted)
+            clipped_inverted = _clip_dark(inverted)
+            dbg["clipped"] = clipped_inverted.copy()
+            img_to_thresh = clipped_inverted
             thresh = _try_threshold_minimum(img_to_thresh)
             if thresh is None:
                 thresh = threshold_otsu(img_to_thresh)
+                dbg["step1_method"] = "otsu_on_clipped"
+            else:
+                dbg["step1_method"] = "threshold_minimum_on_clipped"
+        else:
+            dbg["step1_method"] = "threshold_minimum_on_raw"
 
         labelled = label(img_to_thresh > thresh)
         props = regionprops(labelled)
         if len(props) == 0:
+            self._last_organoid_debug = dbg
             return np.zeros((H, W), dtype=bool)
 
         best_prop = min(props, key=score)
+        dbg["step1_binary"] = (img_to_thresh > thresh).copy()
+        dbg["step1_region"] = (labelled == best_prop.label).copy()
+        dbg["step1_area_frac"] = best_prop.area / xy_area
 
         # Step 2: area too large — clip darkest pixels and retry threshold_minimum.
         if best_prop.area > 0.40 * xy_area:
-            img_to_thresh = _clip_dark(inverted)
+            dbg["step2_triggered"] = True
+            if clipped_inverted is None:
+                clipped_inverted = _clip_dark(inverted)
+                dbg["clipped"] = clipped_inverted.copy()
+            img_to_thresh = clipped_inverted
             thresh = _try_threshold_minimum(img_to_thresh)
             if thresh is not None:
                 labelled = label(img_to_thresh > thresh)
                 props = regionprops(labelled)
                 if len(props) > 0:
                     best_prop = min(props, key=score)
+                dbg["step2_method"] = "threshold_minimum_on_clipped"
+                dbg["step2_binary"] = (img_to_thresh > thresh).copy()
+                dbg["step2_region"] = (labelled == best_prop.label).copy()
+                dbg["step2_area_frac"] = best_prop.area / xy_area
 
             # Step 3: still too large — fall back to Otsu.
             if best_prop.area > 0.40 * xy_area:
+                dbg["step3_triggered"] = True
                 thresh = threshold_otsu(img_to_thresh)
                 labelled = label(img_to_thresh > thresh)
                 props = regionprops(labelled)
                 if len(props) == 0:
+                    self._last_organoid_debug = dbg
                     return np.zeros((H, W), dtype=bool)
                 best_prop = min(props, key=score)
+                dbg["step3_binary"] = (img_to_thresh > thresh).copy()
+                dbg["step3_region"] = (labelled == best_prop.label).copy()
+                dbg["step3_area_frac"] = best_prop.area / xy_area
 
         organoid_region = labelled == best_prop.label
-        organoid_region = remove_small_holes(organoid_region, area_threshold=50000)
+        dbg["final_region"] = organoid_region.copy()
+        organoid_region = remove_small_holes(organoid_region, area_threshold=5000)
         organoid_region = closing(organoid_region, disk(5))
+        self._last_organoid_debug = dbg
         return organoid_region
 
     def _oriented_rect_corners_crop_necks_and_flares(self, mask: np.ndarray):
@@ -954,8 +1114,11 @@ class DeviceSegmentationApp:
         y = cy + s * corners_uv[:, 0] + c * corners_uv[:, 1]
         return np.stack([x, y], axis=1), angle_rad, centroid_xy
 
-    def _segment_from_plane(self, in_focus_plane: np.ndarray, mask_central_region: bool, return_debug: bool):
+    def _segment_from_plane(self, in_focus_plane: np.ndarray, mask_central_region, return_debug: bool):
         flag = False
+        # Normalise legacy bool True → "dark" (original invert-based behaviour)
+        if mask_central_region is True:
+            mask_central_region = "dark"
         in_focus_plane = self._to_gray(in_focus_plane)
 
         median_thresholded = median(np.asarray(in_focus_plane, dtype=np.float32), footprint=disk(7)).astype(np.float32)
@@ -968,7 +1131,7 @@ class DeviceSegmentationApp:
 
         organoid_region = None
         if mask_central_region:
-            organoid_region = self._mask_out_organoid(in_focus_plane)
+            organoid_region = self._mask_out_organoid(in_focus_plane, mode=mask_central_region)
             binary[organoid_region] = 0
 
         labels = label(binary)
@@ -1217,7 +1380,7 @@ class DeviceSegmentationApp:
         focus_downsample: int,
         focus_n_sampling: int,
         focus_patch: int,
-        mask_central_region: bool,
+        mask_central_region,
         see_interim_layers: bool,
         clear_layers: bool,
     ):

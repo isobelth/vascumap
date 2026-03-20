@@ -28,7 +28,7 @@ class VascuMap:
         image_index: int = 0,
         device_width_um: float = 35.0,
         hough_line_length: int = 400,
-        mask_central_region: bool = False,
+        mask_central_region = False,
         channel: int = 0,
         model_p2p=None,
         model_unet=None,
@@ -96,7 +96,7 @@ class VascuMap:
                 image_source=src,
                 image_index=int(image_index),
                 device_width_um=float(device_width_um),
-                mask_central_region=bool(mask_central_region),
+                mask_central_region=mask_central_region,
             )
             self.cropped_stack, self.device_width_um, self.pixel_size_um, self.z_votes, self.image_name = outputs[:5]
             if len(outputs) >= 7:
