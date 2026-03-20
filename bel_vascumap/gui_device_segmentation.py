@@ -783,11 +783,18 @@ class DeviceSegmentationApp:
         yy, xx = np.ogrid[:H, :W]
         central_roi = (yy - cyi) ** 2 + (xx - cxi) ** 2 <= r**2
 
-        thresh = threshold_minimum(inverted)
-        labelled = label(inverted > thresh)
-        props = regionprops(labelled)
-        if len(props) == 0:
-            return np.zeros((H, W), dtype=bool)
+        inverted = np.nan_to_num(inverted, nan=0.0, posinf=0.0, neginf=0.0)
+
+        def _try_threshold_minimum(img):
+            try:
+                return threshold_minimum(img)
+            except (RuntimeError, ValueError):
+                return None
+
+        def _clip_dark(img):
+            """Raise the floor of the inverted image to suppress dark-end noise."""
+            p5 = float(np.percentile(img, 5))
+            return np.clip(img, p5, None)
 
         def score(p):
             overlap = np.sum(labelled[central_roi] == p.label)
@@ -795,16 +802,40 @@ class DeviceSegmentationApp:
             dist2 = (py - cyi) ** 2 + (px - cxi) ** 2
             return (-overlap, dist2)
 
+        # Step 1: threshold_minimum on the raw inverted image.
+        img_to_thresh = inverted
+        thresh = _try_threshold_minimum(img_to_thresh)
+        if thresh is None:
+            img_to_thresh = _clip_dark(inverted)
+            thresh = _try_threshold_minimum(img_to_thresh)
+            if thresh is None:
+                thresh = threshold_otsu(img_to_thresh)
+
+        labelled = label(img_to_thresh > thresh)
+        props = regionprops(labelled)
+        if len(props) == 0:
+            return np.zeros((H, W), dtype=bool)
+
         best_prop = min(props, key=score)
-        # py, px = best_prop.centroid
-        # center_dist_frac = np.sqrt((py - cyi) ** 2 + (px - cxi) ** 2) / min(H, W)
-        # if best_prop.solidity < 0.5 or center_dist_frac > 0.3:
-        #     thresh = threshold_otsu(inverted)
-        #     labelled = label(inverted > thresh)
-        #     props = regionprops(labelled)
-        #     if len(props) == 0:
-        #         return np.zeros((H, W), dtype=bool)
-        #     best_prop = min(props, key=score)
+
+        # Step 2: area too large — clip darkest pixels and retry threshold_minimum.
+        if best_prop.area > 0.40 * xy_area:
+            img_to_thresh = _clip_dark(inverted)
+            thresh = _try_threshold_minimum(img_to_thresh)
+            if thresh is not None:
+                labelled = label(img_to_thresh > thresh)
+                props = regionprops(labelled)
+                if len(props) > 0:
+                    best_prop = min(props, key=score)
+
+            # Step 3: still too large — fall back to Otsu.
+            if best_prop.area > 0.40 * xy_area:
+                thresh = threshold_otsu(img_to_thresh)
+                labelled = label(img_to_thresh > thresh)
+                props = regionprops(labelled)
+                if len(props) == 0:
+                    return np.zeros((H, W), dtype=bool)
+                best_prop = min(props, key=score)
 
         organoid_region = labelled == best_prop.label
         organoid_region = remove_small_holes(organoid_region, area_threshold=50000)

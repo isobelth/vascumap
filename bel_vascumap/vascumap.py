@@ -406,6 +406,19 @@ class VascuMap:
                 name_prefix=name_prefix, run_suffix=0, output_dir=out,
             )
 
+        # ── Organoid size guard ───────────────────────────────────────────
+        if self.mask_central_region_enabled and self.cropped_organoid_mask_xy is not None:
+            _org_mask = np.asarray(self.cropped_organoid_mask_xy, dtype=bool)
+            if _org_mask.size > 0:
+                _org_fraction = np.count_nonzero(_org_mask) / _org_mask.size
+                if _org_fraction > 0.40:
+                    print(
+                        f"  ⚠ Skipping {name_prefix}: organoid covers "
+                        f"{_org_fraction:.1%} of the image (>40% threshold). "
+                        f"Device segmentation outputs saved."
+                    )
+                    return
+
         # ── Run pipeline stages ───────────────────────────────────────────
         # (Commented out for device-segmentation-only testing)
         result = self.preprocess()
