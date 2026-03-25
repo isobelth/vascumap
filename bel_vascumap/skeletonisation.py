@@ -14,6 +14,7 @@ from skimage.morphology import skeletonize as skeletonize_3d
 import sknw
 import networkx as nx
 from scipy.spatial.distance import cdist
+from scipy.spatial import ConvexHull
 from scipy.ndimage import distance_transform_edt as edt
 from scipy import ndimage as ndi
 from utils import cupy_chunk_processing
@@ -680,13 +681,30 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
     norm_g = Normalize(vmin=vmin, vmax=vmax)
     sm = cm.ScalarMappable(norm=norm_g, cmap=cm.magma)
 
-    def _draw_graph(ax, g, diams, graph_title):
+    def _edge_orientations(g):
+        orientations = []
+        for u, v in g.edges():
+            try:
+                pts = g[u][v]['pts'].astype(float)
+                orientations.append(_orientation_to_device_axis_deg(pts))
+            except (KeyError, IndexError):
+                orientations.append(np.nan)
+        return orientations
+
+    clean_orientations = _edge_orientations(clean_graph)
+
+    valid_orient = [o for o in clean_orientations if np.isfinite(o)]
+    norm_orient = Normalize(vmin=0, vmax=90)
+    sm_orient = cm.ScalarMappable(norm=norm_orient, cmap=cm.magma)
+
+    def _draw_graph(ax, g, edge_values, scalar_mappable, graph_title):
         ax.imshow(background)
-        for (u, v), diam in zip(g.edges(), diams):
+        for (u, v), val in zip(g.edges(), edge_values):
             try:
                 pts = g[u][v]['pts'].astype(int)
+                color = scalar_mappable.to_rgba(val) if np.isfinite(val) else (0.5, 0.5, 0.5, 1.0)
                 ax.plot(pts[:, 2], pts[:, 1],
-                        color=sm.to_rgba(diam), linewidth=2.0, solid_capstyle='round')
+                        color=color, linewidth=2.0, solid_capstyle='round')
             except (KeyError, IndexError):
                 continue
         nx_x, nx_y, nc = [], [], []
@@ -744,18 +762,18 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
     ax[2].imshow(seg_max, cmap='gray')
     ax[2].set_title(f'Reconstructed vasculature  ({nz} z-slices)', fontsize=13)
 
-    # ── Panel 3: full skeleton overlaid on segmentation ──────────────────────
-    ax[3].imshow(overlay_skel)
-    ax[3].set_title(f'Skeleton  ({int(skeleton.sum()):,} voxels)', fontsize=13)
+    # ── Panel 3: clean skeleton overlaid on segmentation ─────────────────────
+    ax[3].imshow(overlay_clean)
+    ax[3].set_title(f'Clean skeleton  ({int(clean_skeleton.sum()):,} voxels)', fontsize=13)
 
-    # ── Panel 4: clean skeleton overlaid on segmentation ─────────────────────
-    ax[4].imshow(overlay_clean)
-    ax[4].set_title(f'Clean skeleton  ({int(clean_skeleton.sum()):,} voxels)', fontsize=13)
+    # ── Panel 4: pruned clean graph (coloured by diameter) ──────────────────
+    _draw_graph(ax[4], clean_graph, clean_diams, sm, 'Clean graph — diameter')
 
-    # ── Panel 5: pruned clean graph ───────────────────────────────────────────
-    _draw_graph(ax[5], clean_graph, clean_diams, 'Clean graph (pruned)')
+    # ── Panel 5: pruned clean graph (coloured by orientation) ─────────────────
+    _draw_graph(ax[5], clean_graph, clean_orientations, sm_orient, 'Clean graph — orientation')
 
-    fig.colorbar(sm, ax=ax[-1], fraction=0.02, pad=0.02, label='Vessel diameter (\u00b5m)')
+    fig.colorbar(sm, ax=ax[4], fraction=0.02, pad=0.02, label='Vessel diameter (\u00b5m)')
+    fig.colorbar(sm_orient, ax=ax[5], fraction=0.02, pad=0.02, label='Orientation to device axis (\u00b0)')
     for a in ax:
         a.axis("off")
     plt.suptitle(title, fontsize=16)
@@ -865,6 +883,17 @@ def clean_and_analyse(
         chip_volume_um3 -= float(excluded_voxels) * voxel_volume_um3
     vessel_volume_um3 = float(np.count_nonzero(clean_segmentation)) * voxel_volume_um3
 
+    # ---- convex hull volume of segmented region ----
+    seg_pts = np.argwhere(clean_segmentation > 0)
+    if len(seg_pts) >= 4:
+        try:
+            hull = ConvexHull(seg_pts * voxel_size_um[None, :])
+            convex_hull_volume_um3 = hull.volume
+        except Exception:
+            convex_hull_volume_um3 = chip_volume_um3
+    else:
+        convex_hull_volume_um3 = chip_volume_um3
+
     if clean_graph.number_of_edges() > 0:
         fd, lacunarity = fractal_dimension_and_lacunarity(skeleton_from_graph > 0)
         total_vessel_length_um = np.sum([
@@ -886,10 +915,11 @@ def clean_and_analyse(
         sprouts_count = 0
 
     global_metrics['chip_volume_um3'] = chip_volume_um3
+    global_metrics['convex_hull_volume_um3'] = convex_hull_volume_um3
     global_metrics['vessel_volume_um3'] = vessel_volume_um3
-    global_metrics['vessel_volume_fraction'] = safe_divide(vessel_volume_um3, chip_volume_um3)
+    global_metrics['vessel_volume_fraction'] = safe_divide(vessel_volume_um3, convex_hull_volume_um3)
     global_metrics['total_vessel_length_um'] = float(total_vessel_length_um)
-    global_metrics['vessel_length_per_chip_volume_um_inverse2'] = safe_divide(total_vessel_length_um, chip_volume_um3)
+    global_metrics['vessel_length_per_chip_volume_um_inverse2'] = safe_divide(total_vessel_length_um, convex_hull_volume_um3)
     global_metrics['sprouts_per_vessel_length_um_inverse'] = safe_divide(sprouts_count, total_vessel_length_um)
     global_metrics['junctions_per_vessel_length_um_inverse'] = safe_divide(branchpoints_count, total_vessel_length_um)
     global_metrics['skeleton_fractal_dimension'] = fd
@@ -937,8 +967,8 @@ def clean_and_analyse(
     global_metrics.update(pore_global_metrics)
 
     # ---- extra density metrics ----
-    global_metrics['sprouts_per_chip_volume_um_inverse3'] = safe_divide(sprouts_count, chip_volume_um3)
-    global_metrics['junctions_per_chip_volume_um_inverse3'] = safe_divide(branchpoints_count, chip_volume_um3)
+    global_metrics['sprouts_per_chip_volume_um_inverse3'] = safe_divide(sprouts_count, convex_hull_volume_um3)
+    global_metrics['junctions_per_chip_volume_um_inverse3'] = safe_divide(branchpoints_count, convex_hull_volume_um3)
     global_metrics['total_internal_pore_density_per_vessel_volume_um_inverse3'] = safe_divide(
         global_metrics.get('total_internal_pore_count', np.nan),
         vessel_volume_um3,

@@ -167,8 +167,8 @@ class DeviceSegmentationApp:
         bin_size: float = 2.0,
         min_run_frac: float = 0.25,
         typical_pct: float = 50.0,
-        line_length: int = 500,
-        line_gap: int = 400,
+        line_length: int = 300,
+        line_gap: int = 200,
         hough_threshold: int = 70,
         mask_sigma: float = 5.0,
         mask_frac_thresh: float = 0.40,
@@ -613,6 +613,13 @@ class DeviceSegmentationApp:
         plt.close(fig)
         print(f"  Organoid debug plot → {save_path.name}")
 
+        # Save the try_all_threshold diagnostic (always generated for organoid segmentation).
+        try_all_img = dbg.get("try_all_threshold_img")
+        if try_all_img is not None:
+            ta_path = Path(out_dir) / f"{name_prefix}_organoid_try_all_threshold.png"
+            plt.imsave(str(ta_path), try_all_img)
+            print(f"  try_all_threshold plot → {ta_path.name}")
+
     # -------- Focus helpers (integrated; no separate class) --------
     def _to_gray(self, im):
         if im.ndim == 2:
@@ -895,31 +902,12 @@ class DeviceSegmentationApp:
         # Alias used throughout the rest of the function (kept for clarity)
         inverted = processed
 
-        clipped_inverted = None  # computed at most once and reused
-
-        def _try_threshold_minimum(img):
-            try:
-                return threshold_minimum(img)
-            except (RuntimeError, ValueError):
-                return None
-
-        def _clip_dark(img):
-            """Raise the floor of the inverted image to suppress dark-end noise."""
-            p5 = float(np.percentile(img, 15))
-            return np.clip(img, p5, None)
-
-        def score(p):
-            overlap = np.sum(labelled[central_roi] == p.label)
-            py, px = p.centroid
-            dist2 = (py - cyi) ** 2 + (px - cxi) ** 2
-            return (-overlap, dist2)
-
         # Debug accumulator — populated as each step runs
         dbg = {
             "in_focus_plane": np.asarray(in_focus_plane),
             "mode": mode,
             "processed": inverted.copy(),
-            "clipped": None,
+            "try_all_threshold_img": None,
             "step1_method": None,
             "step1_binary": None,
             "step1_region": None,
@@ -929,77 +917,78 @@ class DeviceSegmentationApp:
             "step2_binary": None,
             "step2_region": None,
             "step2_area_frac": None,
-            "step3_triggered": False,
-            "step3_binary": None,
-            "step3_region": None,
-            "step3_area_frac": None,
             "final_region": None,
         }
 
-        # Step 1: threshold_minimum on the raw inverted image.
-        img_to_thresh = inverted
-        thresh = _try_threshold_minimum(img_to_thresh)
+        # Always generate try_all_threshold on the sigma-smoothed image
+        # (already inverted for dark organoids).
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        try:
+            fig, _ = try_all_threshold(inverted, figsize=(10, 8), verbose=False)
+            mode_label = "sigma-smoothed" if mode == "light" else "inverted + sigma-smoothed"
+            fig.suptitle(f"try_all_threshold — {mode} organoid ({mode_label})", fontsize=10)
+            fig.canvas.draw()
+            buf = fig.canvas.buffer_rgba()
+            dbg["try_all_threshold_img"] = np.asarray(buf).copy()
+            plt.close(fig)
+        except Exception as _e:
+            print(f"[organoid] try_all_threshold generation failed: {_e}")
+
+        # Store debug early so it is available even if segmentation fails.
+        self._last_organoid_debug = dbg
+
+        def _try_threshold_minimum(img):
+            try:
+                return threshold_minimum(img)
+            except (RuntimeError, ValueError):
+                return None
+
+        def score(p):
+            overlap = np.sum(labelled[central_roi] == p.label)
+            py, px = p.centroid
+            dist2 = (py - cyi) ** 2 + (px - cxi) ** 2
+            return (-overlap, dist2)
+
+        # Step 1: threshold_minimum on the raw inverted image; fall back to Otsu.
+        thresh = _try_threshold_minimum(inverted)
         if thresh is None:
-            clipped_inverted = _clip_dark(inverted)
-            dbg["clipped"] = clipped_inverted.copy()
-            img_to_thresh = clipped_inverted
-            thresh = _try_threshold_minimum(img_to_thresh)
-            if thresh is None:
-                thresh = threshold_otsu(img_to_thresh)
-                dbg["step1_method"] = "otsu_on_clipped"
-            else:
-                dbg["step1_method"] = "threshold_minimum_on_clipped"
+            thresh = threshold_otsu(inverted)
+            dbg["step1_method"] = "otsu_on_raw"
         else:
             dbg["step1_method"] = "threshold_minimum_on_raw"
 
-        labelled = label(img_to_thresh > thresh)
+        labelled = label(inverted > thresh)
         props = regionprops(labelled)
         if len(props) == 0:
-            self._last_organoid_debug = dbg
             return np.zeros((H, W), dtype=bool)
 
         best_prop = min(props, key=score)
-        dbg["step1_binary"] = (img_to_thresh > thresh).copy()
+        dbg["step1_binary"] = (inverted > thresh).copy()
         dbg["step1_region"] = (labelled == best_prop.label).copy()
         dbg["step1_area_frac"] = best_prop.area / xy_area
 
-        # Step 2: area too large — clip darkest pixels and retry threshold_minimum.
+        # Step 2: area too large — fall back to Otsu.
         if best_prop.area > 0.40 * xy_area:
             dbg["step2_triggered"] = True
-            if clipped_inverted is None:
-                clipped_inverted = _clip_dark(inverted)
-                dbg["clipped"] = clipped_inverted.copy()
-            img_to_thresh = clipped_inverted
-            thresh = _try_threshold_minimum(img_to_thresh)
-            if thresh is not None:
-                labelled = label(img_to_thresh > thresh)
-                props = regionprops(labelled)
-                if len(props) > 0:
-                    best_prop = min(props, key=score)
-                dbg["step2_method"] = "threshold_minimum_on_clipped"
-                dbg["step2_binary"] = (img_to_thresh > thresh).copy()
-                dbg["step2_region"] = (labelled == best_prop.label).copy()
-                dbg["step2_area_frac"] = best_prop.area / xy_area
 
-            # Step 3: still too large — fall back to Otsu.
-            if best_prop.area > 0.40 * xy_area:
-                dbg["step3_triggered"] = True
-                thresh = threshold_otsu(img_to_thresh)
-                labelled = label(img_to_thresh > thresh)
-                props = regionprops(labelled)
-                if len(props) == 0:
-                    self._last_organoid_debug = dbg
-                    return np.zeros((H, W), dtype=bool)
-                best_prop = min(props, key=score)
-                dbg["step3_binary"] = (img_to_thresh > thresh).copy()
-                dbg["step3_region"] = (labelled == best_prop.label).copy()
-                dbg["step3_area_frac"] = best_prop.area / xy_area
+            # Fall back to Otsu on raw.
+            thresh = threshold_otsu(inverted)
+            labelled = label(inverted > thresh)
+            props = regionprops(labelled)
+            if len(props) == 0:
+                return np.zeros((H, W), dtype=bool)
+            best_prop = min(props, key=score)
+            dbg["step2_method"] = "otsu_on_raw"
+            dbg["step2_binary"] = (inverted > thresh).copy()
+            dbg["step2_region"] = (labelled == best_prop.label).copy()
+            dbg["step2_area_frac"] = best_prop.area / xy_area
 
         organoid_region = labelled == best_prop.label
         dbg["final_region"] = organoid_region.copy()
         organoid_region = remove_small_holes(organoid_region, area_threshold=5000)
         organoid_region = closing(organoid_region, disk(5))
-        self._last_organoid_debug = dbg
         return organoid_region
 
     def _oriented_rect_corners_crop_necks_and_flares(self, mask: np.ndarray):
