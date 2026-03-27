@@ -257,7 +257,10 @@ class Pix2Pix(pl.LightningModule):
 
         psnr = torchmetrics.PeakSignalNoiseRatio().to(device)
         ssim = torchmetrics.StructuralSimilarityIndexMeasure().to(device)
-        accuracy = torchmetrics.Accuracy(task="binary").to(device)
+        # C4: use separate Accuracy instances so each call doesn't reset the others' state
+        gen_acc_metric       = torchmetrics.Accuracy(task="binary").to(device)
+        disc_acc_real_metric = torchmetrics.Accuracy(task="binary").to(device)
+        disc_acc_fake_metric = torchmetrics.Accuracy(task="binary").to(device)
         
         # Generator Feed-Forward
         generator_prediction = self.forward(image)
@@ -266,14 +269,16 @@ class Pix2Pix(pl.LightningModule):
         generator_psnr = psnr(generator_prediction, target)
         generator_ssim = ssim(generator_prediction, target)
         discriminator_prediction_fake = self.discriminator(torch.cat((image, generator_prediction), dim=1))
-        generator_accuracy = accuracy(discriminator_prediction_fake, torch.ones_like(discriminator_prediction_fake, dtype=torch.int32))
+        generator_accuracy = gen_acc_metric(discriminator_prediction_fake, torch.ones_like(discriminator_prediction_fake, dtype=torch.int32))
         
         # Discriminator Feed-Forward
         discriminator_prediction_real = self.discriminator(torch.cat((image, target), dim=1))
         discriminator_prediction_fake = self.discriminator(torch.cat((image, generator_prediction), dim=1))
         # Discriminator Metrics
-        discriminator_accuracy = accuracy(discriminator_prediction_real, torch.ones_like(discriminator_prediction_real, dtype=torch.int32)) * 0.5 + \
-                                accuracy(discriminator_prediction_fake, torch.zeros_like(discriminator_prediction_fake, dtype=torch.int32)) * 0.5
+        discriminator_accuracy = (
+            disc_acc_real_metric(discriminator_prediction_real, torch.ones_like(discriminator_prediction_real, dtype=torch.int32)) * 0.5
+            + disc_acc_fake_metric(discriminator_prediction_fake, torch.zeros_like(discriminator_prediction_fake, dtype=torch.int32)) * 0.5
+        )
             
         # Progressbar and Logging
         metrics = OrderedDict({'val_g_psnr': generator_psnr, 'val_g_ssim': generator_ssim,
@@ -474,8 +479,11 @@ def predict_mask_ortho(model_smp, vessel_pred_iso, device):
     if 'cuda' in device:
         torch.cuda.empty_cache()
 
-    if tensor_shape[2] < 256:
-        pad_d = 256 - tensor_shape[2]
+    # A3: compute padding params once, reuse for both coronal and sagittal unpadding
+    z_depth = tensor_shape[2]
+    pad_pre = 0
+    if z_depth < 256:
+        pad_d = 256 - z_depth
         pad_pre = pad_d // 2
         pad_post = pad_d - pad_pre
         vessel_pred_tensor = F.pad(vessel_pred_tensor, (0, 0, 0, 0, pad_pre, pad_post), mode='constant', value=-1)
@@ -505,10 +513,8 @@ def predict_mask_ortho(model_smp, vessel_pred_iso, device):
     with torch.no_grad():
         output3D_coronal = torch.sigmoid(coronal_inferer(vessel_pred_tensor, model_smp))
 
-    if tensor_shape[2] < 256:
-        pad_d = 256 - tensor_shape[2]
-        pad_pre = pad_d // 2
-        vessel_coronal = output3D_coronal.squeeze().to('cpu').numpy()[pad_pre:pad_pre + tensor_shape[2], :, :]
+    if pad_pre > 0:
+        vessel_coronal = output3D_coronal.squeeze().to('cpu').numpy()[pad_pre:pad_pre + z_depth, :, :]
     else:
         vessel_coronal = output3D_coronal.squeeze().to('cpu').numpy()
 
@@ -520,10 +526,8 @@ def predict_mask_ortho(model_smp, vessel_pred_iso, device):
     with torch.no_grad():
         output3D_sagital = torch.sigmoid(sagital_inferer(vessel_pred_tensor, model_smp))
 
-    if tensor_shape[2] < 256:
-        pad_d = 256 - tensor_shape[2]
-        pad_pre = pad_d // 2
-        vessel_sagital = output3D_sagital.squeeze().to('cpu').numpy()[pad_pre:pad_pre + tensor_shape[2], :, :]
+    if pad_pre > 0:
+        vessel_sagital = output3D_sagital.squeeze().to('cpu').numpy()[pad_pre:pad_pre + z_depth, :, :]
     else:
         vessel_sagital = output3D_sagital.squeeze().to('cpu').numpy()
 

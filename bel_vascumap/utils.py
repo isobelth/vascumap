@@ -2,7 +2,6 @@ import os
 import sys
 import ctypes
 from pathlib import Path
-import dask.array as da
 from skimage.transform import resize
 import numpy as np
 from tqdm.auto import tqdm
@@ -42,29 +41,22 @@ def scale(arr):
 
 def resize_dask(stack, rescale_factor):
     """
-    Resize a 3D stack using Dask for memory efficiency.
+    Resize a 3D stack by the given per-axis scale factors.
+
+    B4: replaced the previous map_blocks implementation which applied resize
+    independently to each Dask chunk, producing incorrect boundary behaviour
+    for multi-chunk volumes. skimage.transform.resize operates on the full
+    array and is fast enough for the sizes used in this pipeline.
 
     Args:
         stack (np.ndarray): Input 3D stack.
         rescale_factor (list or tuple): Scaling factors for each dimension.
 
     Returns:
-        np.ndarray: Resized stack.
+        np.ndarray: Resized stack, same dtype as input.
     """
-    
-    stack_dask = da.from_array(stack, chunks='auto')
-    rescaled_stack = stack_dask.map_blocks(
-        lambda block: resize(
-            block, 
-            (int(block.shape[0] * rescale_factor[0]),  
-            int(block.shape[1] * rescale_factor[1]),
-            int(block.shape[2] * rescale_factor[2]),
-            ),
-            order=3
-        ),
-        dtype=stack.dtype
-    )
-    return rescaled_stack.compute()
+    new_shape = tuple(max(1, int(round(stack.shape[i] * rescale_factor[i]))) for i in range(len(rescale_factor)))
+    return resize(stack, new_shape, order=3, preserve_range=True, anti_aliasing=True).astype(stack.dtype)
 
 
 def cupy_chunk_processing(volume, processing_func, chunk_size=(64, 512, 512),

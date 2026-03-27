@@ -70,6 +70,7 @@ class VascuMap:
         self._z_stop_final = None
         self._pixels_to_remove = None
         self._exclusion_mask_xy_aligned = None
+        self._resized_organoid_mask_pre_trim = None  # cached after model_inference
         self.image_source_path = image_source_path
         self.image_index = int(image_index) if image_index is not None else 0
         self.hough_line_length = int(hough_line_length)
@@ -243,16 +244,18 @@ class VascuMap:
                         resized_mask = np.pad(resized_mask, ((0, 0), (0, pad_w)), mode="constant", constant_values=False)
                     resized_mask = resized_mask[:target_h, :target_w]
 
+                    # A1: cache full-resolution mask for reuse in skeletonisation_and_analysis
+                    self._resized_organoid_mask_pre_trim = resized_mask
+
                     if np.any(resized_mask):
+                        # A2: vectorised fill — compute per-slice means in one shot instead of a Python loop
                         fill_source = np.asarray(cropped_stack)
                         valid_region = ~resized_mask
-                        for zi in range(fill_source.shape[0]):
-                            slice_data = fill_source[zi]
-                            if np.any(valid_region):
-                                fill_value = float(np.mean(slice_data[valid_region]))
-                            else:
-                                fill_value = float(np.mean(slice_data))
-                            slice_data[resized_mask] = fill_value
+                        if np.any(valid_region):
+                            fill_values = np.mean(fill_source[:, valid_region], axis=1)  # (Z,)
+                        else:
+                            fill_values = np.mean(fill_source, axis=(1, 2))  # (Z,)
+                        fill_source[:, resized_mask] = fill_values[:, None]
 
         stack_bf = scale(cropped_stack)
         vessel_pred = self.model_p2p.predict(stack_bf, device, n_iter=1)
@@ -344,34 +347,42 @@ class VascuMap:
         # Build exclusion mask matched to vessel_mask_iso shape if organoid masking was used
         exclusion_mask_xy = None
         if self.mask_central_region_enabled and self.cropped_organoid_mask_xy is not None:
-            mask_xy = np.asarray(self.cropped_organoid_mask_xy, dtype=np.float32)
-            if mask_xy.ndim == 2 and mask_xy.size > 0:
-                target_h = int(self.vessel_mask_iso.shape[1])
-                target_w = int(self.vessel_mask_iso.shape[2])
-                src_h, src_w = int(mask_xy.shape[0]), int(mask_xy.shape[1])
-                if src_h > 0 and src_w > 0:
-                    # Resize to pre-trim resolution (same XY as model output)
-                    ptr = self._pixels_to_remove if self._pixels_to_remove is not None else int(self.device_width_um)
-                    pre_trim_h = target_h + 2 * ptr
-                    pre_trim_w = target_w + 2 * ptr
-                    scale_h = float(pre_trim_h) / float(src_h)
-                    scale_w = float(pre_trim_w) / float(src_w)
-                    resized = resize_dask(mask_xy[None, :, :], [1.0, scale_h, scale_w])[0]
-                    resized = np.asarray(resized > 0.5, dtype=bool)
-                    # Apply same device-width trim as postprocess
-                    resized = resized[ptr:ptr + target_h,
-                                      ptr:ptr + target_w]
-                    # Pad/clip to exact target shape
-                    if resized.shape[0] < target_h:
-                        resized = np.pad(resized, ((0, target_h - resized.shape[0]), (0, 0)),
-                                         mode="constant", constant_values=False)
-                    if resized.shape[1] < target_w:
-                        resized = np.pad(resized, ((0, 0), (0, target_w - resized.shape[1])),
-                                         mode="constant", constant_values=False)
-                    resized = resized[:target_h, :target_w]
-                    if np.any(resized):
-                        exclusion_mask_xy = resized
-                        print(f"Organoid exclusion mask applied: {int(np.count_nonzero(exclusion_mask_xy))} pixels excluded per z-slice")
+            target_h = int(self.vessel_mask_iso.shape[1])
+            target_w = int(self.vessel_mask_iso.shape[2])
+            ptr = self._pixels_to_remove if self._pixels_to_remove is not None else int(self.device_width_um)
+
+            if self._resized_organoid_mask_pre_trim is not None:
+                # A1: reuse the mask already resized in model_inference — just apply the XY trim
+                resized = self._resized_organoid_mask_pre_trim[ptr:ptr + target_h, ptr:ptr + target_w]
+            else:
+                # Fallback: compute from scratch (e.g. if model_inference was skipped)
+                mask_xy = np.asarray(self.cropped_organoid_mask_xy, dtype=np.float32)
+                if mask_xy.ndim == 2 and mask_xy.size > 0:
+                    src_h, src_w = int(mask_xy.shape[0]), int(mask_xy.shape[1])
+                    if src_h > 0 and src_w > 0:
+                        pre_trim_h = target_h + 2 * ptr
+                        pre_trim_w = target_w + 2 * ptr
+                        scale_h = float(pre_trim_h) / float(src_h)
+                        scale_w = float(pre_trim_w) / float(src_w)
+                        resized = resize_dask(mask_xy[None, :, :], [1.0, scale_h, scale_w])[0]
+                        resized = np.asarray(resized > 0.5, dtype=bool)
+                        resized = resized[ptr:ptr + target_h, ptr:ptr + target_w]
+                    else:
+                        resized = np.zeros((target_h, target_w), dtype=bool)
+                else:
+                    resized = np.zeros((target_h, target_w), dtype=bool)
+
+            # Pad/clip to exact target shape
+            if resized.shape[0] < target_h:
+                resized = np.pad(resized, ((0, target_h - resized.shape[0]), (0, 0)),
+                                 mode="constant", constant_values=False)
+            if resized.shape[1] < target_w:
+                resized = np.pad(resized, ((0, 0), (0, target_w - resized.shape[1])),
+                                 mode="constant", constant_values=False)
+            resized = resized[:target_h, :target_w]
+            if np.any(resized):
+                exclusion_mask_xy = resized
+                print(f"Organoid exclusion mask applied: {int(np.count_nonzero(exclusion_mask_xy))} pixels excluded per z-slice")
 
         self._exclusion_mask_xy_aligned = exclusion_mask_xy
         self.analysis_results = clean_and_analyse(

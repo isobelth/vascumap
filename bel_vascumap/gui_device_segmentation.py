@@ -814,7 +814,17 @@ class DeviceSegmentationApp:
         return warped.astype(in_focus_plane.dtype)
 
     def _crop_rectified_stack_from_corners(self, stack: np.ndarray, corners_xy: np.ndarray):
-        if corners_xy is None or stack is None:
+        # C3: delegate to the unified _crop_rectified method
+        return self._crop_rectified(stack, corners_xy)
+
+    def _crop_rectified(self, data: np.ndarray, corners_xy: np.ndarray):
+        """C3: unified crop for 2-D planes, 3-D stacks, and 4-D stacks (z, h, w, c).
+
+        Replaces the separate _crop_rectified_stack_from_corners path; the 2-D
+        _crop_rectified_from_corners still handles the single-plane case directly
+        for clarity.
+        """
+        if corners_xy is None or data is None:
             return None
         c = self._order_corners_clockwise(corners_xy)
         w1 = np.hypot(c[1, 0] - c[0, 0], c[1, 1] - c[0, 1])
@@ -831,30 +841,25 @@ class DeviceSegmentationApp:
         if not tform.estimate(dst, c):
             return None
 
-        if stack.ndim == 3:
+        if data.ndim == 2:
+            warped = warp(data, tform, output_shape=(height, width), order=1, preserve_range=True)
+        elif data.ndim == 3:
             warped = np.stack(
-                [warp(stack[z], tform, output_shape=(height, width), order=1, preserve_range=True) for z in range(stack.shape[0])],
+                [warp(data[z], tform, output_shape=(height, width), order=1, preserve_range=True)
+                 for z in range(data.shape[0])],
                 axis=0,
             )
-        elif stack.ndim == 4:
+        elif data.ndim == 4:
             warped = np.stack(
-                [
-                    warp(
-                        stack[z],
-                        tform,
-                        output_shape=(height, width),
-                        order=1,
-                        preserve_range=True,
-                        channel_axis=-1,
-                    )
-                    for z in range(stack.shape[0])
-                ],
+                [warp(data[z], tform, output_shape=(height, width), order=1,
+                      preserve_range=True, channel_axis=-1)
+                 for z in range(data.shape[0])],
                 axis=0,
             )
         else:
             return None
 
-        return warped.astype(stack.dtype)
+        return warped.astype(data.dtype)
 
     def _signed_orientation(self, region):
         img = region.image.astype(float)

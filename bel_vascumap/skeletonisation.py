@@ -161,7 +161,7 @@ def remove_mid_node(graph):
     return graph
 
 
-def collect_border_vicinity_edges(graph, image_shape, vicinity_xy=50):
+def collect_border_vicinity_edges(graph, image_shape, vicinity_xy=50, inplace=False):
     border_vicinity_edges = set()
     for u, v in graph.edges():
         try:
@@ -174,18 +174,19 @@ def collect_border_vicinity_edges(graph, image_shape, vicinity_xy=50):
         except KeyError:
             continue
 
-    trimmed_subgraph = graph.copy()
-    edges_to_remove = [edge for edge in border_vicinity_edges if trimmed_subgraph.has_edge(*edge)]
-    trimmed_subgraph.remove_edges_from(edges_to_remove)
+    # B3: skip copy when caller has already done it
+    g = graph if inplace else graph.copy()
+    edges_to_remove = [edge for edge in border_vicinity_edges if g.has_edge(*edge)]
+    g.remove_edges_from(edges_to_remove)
 
-    isolated_nodes = [node for node in trimmed_subgraph.nodes() if trimmed_subgraph.degree[node] == 0]
+    isolated_nodes = [node for node in g.nodes() if g.degree[node] == 0]
     if isolated_nodes:
-        trimmed_subgraph.remove_nodes_from(isolated_nodes)
+        g.remove_nodes_from(isolated_nodes)
 
-    return trimmed_subgraph
+    return g
 
 
-def collect_exclusion_zone_edges(graph, exclusion_mask_xy):
+def collect_exclusion_zone_edges(graph, exclusion_mask_xy, inplace=False):
     """Remove graph edges that pass through the exclusion zone (e.g. organoid region)."""
     exclusion_edges = set()
     for u, v in graph.edges():
@@ -196,15 +197,16 @@ def collect_exclusion_zone_edges(graph, exclusion_mask_xy):
         except (KeyError, IndexError):
             continue
 
-    trimmed = graph.copy()
-    edges_to_remove = [e for e in exclusion_edges if trimmed.has_edge(*e)]
-    trimmed.remove_edges_from(edges_to_remove)
+    # B3: skip copy when caller has already done it
+    g = graph if inplace else graph.copy()
+    edges_to_remove = [e for e in exclusion_edges if g.has_edge(*e)]
+    g.remove_edges_from(edges_to_remove)
 
-    isolated = [n for n in trimmed.nodes() if trimmed.degree[n] == 0]
+    isolated = [n for n in g.nodes() if g.degree[n] == 0]
     if isolated:
-        trimmed.remove_nodes_from(isolated)
+        g.remove_nodes_from(isolated)
 
-    return trimmed
+    return g
 
 
 def compute_cross_sectional_areas(mask, skeleton, binary_edt, voxel_size_um=(2.0, 2.0, 2.0)):
@@ -432,39 +434,52 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
             seg_lengths = np.linalg.norm(np.diff(pts_um, axis=0), axis=1)
             graph_weighted.edges[u, v]['path_length_um'] = float(np.sum(seg_lengths))
 
-        node_to_idx = {n: i for i, n in enumerate(nodes)}
-        dist_matrix = np.full((len(nodes), len(nodes)), np.inf, dtype=float)
-        for source in nodes:
-            i = node_to_idx[source]
-            lengths = nx.single_source_dijkstra_path_length(
-                graph_weighted, source, weight='path_length_um'
-            )
-            for target, d in lengths.items():
-                j = node_to_idx[target]
-                dist_matrix[i, j] = float(d)
+        # B2: only run Dijkstra from nodes of each relevant type and record the
+        # nearest-neighbour distance — avoids building an O(N²) distance matrix.
+        junction_nodes = [n for n, t in zip(nodes, node_type) if t == 'junction']
+        sprout_nodes   = [n for n, t in zip(nodes, node_type) if t == 'sprout']
+        junction_set   = set(junction_nodes)
+        sprout_set     = set(sprout_nodes)
+
+        def _nearest_same_type(source_list, same_set):
+            nearest = []
+            for source in source_list:
+                lengths = nx.single_source_dijkstra_path_length(
+                    graph_weighted, source, weight='path_length_um'
+                )
+                others = [d for target, d in lengths.items()
+                          if target in same_set and target != source and np.isfinite(d)]
+                if others:
+                    nearest.append(min(others))
+            return nearest
+
+        junction_nearest = _nearest_same_type(junction_nodes, junction_set)
+        sprout_nearest   = _nearest_same_type(sprout_nodes,   sprout_set)
     else:
-        dist_matrix = cdist(positions_um, positions_um)
+        # Euclidean: still build sub-distance matrices but only for same-type nodes
+        junction_mask  = node_type == 'junction'
+        sprout_mask    = node_type == 'sprout'
+        pos_junc       = positions_um[junction_mask]
+        pos_sprout     = positions_um[sprout_mask]
 
-    endpoint_mask = (node_type == 'sprout')
-    branch_point_mask = (node_type == 'junction')
+        def _nearest_euclidean(pos):
+            if len(pos) < 2:
+                return []
+            d = cdist(pos, pos)
+            np.fill_diagonal(d, np.inf)
+            near = np.min(d, axis=1)
+            return list(near[np.isfinite(near)])
 
-    if np.any(branch_point_mask):
-        sub_dist = dist_matrix[np.ix_(branch_point_mask, branch_point_mask)].copy()
-        np.fill_diagonal(sub_dist, np.inf)
-        nearest = np.min(sub_dist, axis=1)
-        nearest = nearest[np.isfinite(nearest)]
-        if nearest.size > 0:
-            summary['median_junction_dist_nearest_junction_um'] = safe_median(nearest)
-            summary['p90_minus_p10_junction_dist_nearest_junction_um'] = safe_percentile_spread(nearest)
+        junction_nearest = _nearest_euclidean(pos_junc)
+        sprout_nearest   = _nearest_euclidean(pos_sprout)
 
-    if np.any(endpoint_mask):
-        sub_dist = dist_matrix[np.ix_(endpoint_mask, endpoint_mask)].copy()
-        np.fill_diagonal(sub_dist, np.inf)
-        nearest = np.min(sub_dist, axis=1)
-        nearest = nearest[np.isfinite(nearest)]
-        if nearest.size > 0:
-            summary['median_sprout_dist_nearest_endpoint_um'] = safe_median(nearest)
-            summary['p90_minus_p10_sprout_dist_nearest_endpoint_um'] = safe_percentile_spread(nearest)
+    if junction_nearest:
+        summary['median_junction_dist_nearest_junction_um'] = safe_median(junction_nearest)
+        summary['p90_minus_p10_junction_dist_nearest_junction_um'] = safe_percentile_spread(junction_nearest)
+
+    if sprout_nearest:
+        summary['median_sprout_dist_nearest_endpoint_um'] = safe_median(sprout_nearest)
+        summary['p90_minus_p10_sprout_dist_nearest_endpoint_um'] = safe_percentile_spread(sprout_nearest)
 
     return summary
 
@@ -490,15 +505,18 @@ def compute_internal_pore_headline_metrics(
     pore_areas_all = []
     pore_radii_all = []
 
+    # B1: two-pass approach — collect pore slices first, batch all GPU EDT transfers,
+    # then accumulate metrics.  Reduces N×(CPU→GPU + GPU→CPU) to 1×(CPU→GPU + GPU→CPU).
+    pore_slice_data = []  # list of dicts: {z, pores, labeled, valid_label_ids, valid_areas, filled_area_um2}
+
     for z in range(mask.shape[0]):
         vessel_slice = mask[z].astype(bool)
         filled_slice = ndi.binary_fill_holes(vessel_slice)
         internal_pores = filled_slice & ~vessel_slice
 
-        # Exclude organoid / exclusion region from pore and filled-area accounting
         if exclusion_mask_xy is not None:
             internal_pores = internal_pores & ~exclusion_mask_xy
-            filled_slice = filled_slice & ~exclusion_mask_xy
+            filled_slice   = filled_slice   & ~exclusion_mask_xy
 
         filled_area_um2 = float(np.count_nonzero(filled_slice)) * pixel_area_um2
         total_filled_area_um2 += filled_area_um2
@@ -510,40 +528,26 @@ def compute_internal_pore_headline_metrics(
         if n_labels == 0:
             continue
 
-        area_counts = np.bincount(labeled.ravel(), minlength=n_labels + 1)[1:].astype(np.float64)
-        area_um2_all = area_counts * pixel_area_um2
+        area_counts   = np.bincount(labeled.ravel(), minlength=n_labels + 1)[1:].astype(np.float64)
+        area_um2_all  = area_counts * pixel_area_um2
 
-        slice_area_um2 = float(vessel_slice.size) * pixel_area_um2
+        slice_area_um2   = float(vessel_slice.size) * pixel_area_um2
         max_pore_area_um2 = float(max_pore_area_fraction_of_slice) * slice_area_um2
 
-        label_ids = np.arange(1, n_labels + 1, dtype=np.int32)
+        label_ids  = np.arange(1, n_labels + 1, dtype=np.int32)
         valid_mask = (area_um2_all >= min_pore_area_um2) & (area_um2_all <= max_pore_area_um2)
         if not np.any(valid_mask):
             continue
 
-        valid_label_ids = label_ids[valid_mask]
-        valid_areas = area_um2_all[valid_mask]
+        pore_slice_data.append({
+            'z':               z,
+            'pores':           internal_pores,
+            'labeled':         labeled,
+            'valid_label_ids': label_ids[valid_mask],
+            'valid_areas':     area_um2_all[valid_mask],
+        })
 
-        if use_gpu_edt:
-            dist_map_um = cp.asnumpy(
-                ndi_gpu.distance_transform_edt(
-                    cp.asarray(internal_pores, dtype=cp.uint8),
-                    sampling=(float(y_um), float(x_um)),
-                )
-            )
-        else:
-            dist_map_um = edt(internal_pores, sampling=(y_um, x_um))
-
-        valid_radii = np.asarray(
-            ndi.maximum(dist_map_um, labels=labeled, index=valid_label_ids),
-            dtype=float,
-        )
-
-        pore_areas_all.append(valid_areas)
-        pore_radii_all.append(valid_radii)
-        total_pore_area_um2 += float(np.sum(valid_areas))
-
-    if len(pore_areas_all) == 0:
+    if not pore_slice_data:
         return {
             'total_internal_pore_count': 0,
             'internal_pore_area_fraction_in_filled_vascular_area': 0.0,
@@ -552,6 +556,33 @@ def compute_internal_pore_headline_metrics(
             'median_internal_pore_max_inscribed_radius_um': np.nan,
             'p90_minus_p10_internal_pore_max_inscribed_radius_um': np.nan,
         }
+
+    # ── GPU batch EDT ──────────────────────────────────────────────────────
+    if use_gpu_edt:
+        pore_stack    = np.stack([d['pores'] for d in pore_slice_data], axis=0)  # (N, H, W) uint8
+        pore_gpu      = cp.asarray(pore_stack.astype(np.uint8))
+        dist_list_gpu = [
+            ndi_gpu.distance_transform_edt(pore_gpu[i], sampling=(float(y_um), float(x_um)))
+            for i in range(pore_gpu.shape[0])
+        ]
+        dist_stack    = cp.asnumpy(cp.stack(dist_list_gpu, axis=0))  # (N, H, W) – single transfer back
+        del pore_gpu, dist_list_gpu
+        cp.get_default_memory_pool().free_all_blocks()
+    else:
+        dist_stack = np.stack([
+            edt(d['pores'], sampling=(y_um, x_um)) for d in pore_slice_data
+        ], axis=0)
+
+    # ── Accumulate metrics ────────────────────────────────────────────────
+    for idx, d in enumerate(pore_slice_data):
+        dist_map_um    = dist_stack[idx]
+        valid_radii    = np.asarray(
+            ndi.maximum(dist_map_um, labels=d['labeled'], index=d['valid_label_ids']),
+            dtype=float,
+        )
+        pore_areas_all.append(d['valid_areas'])
+        pore_radii_all.append(valid_radii)
+        total_pore_area_um2 += float(np.sum(d['valid_areas']))
 
     all_areas = np.concatenate(pore_areas_all)
     all_radii = np.concatenate(pore_radii_all)
@@ -863,9 +894,11 @@ def clean_and_analyse(
 
     pruned_graph = prune_graph(graph=graph, area_3d=area_image, edt_cutoff=0.20, length_cutoff=25)
     clean_graph = remove_mid_node(pruned_graph)
-    clean_graph = collect_border_vicinity_edges(clean_graph, vasculature_segmentation.shape)
+    # B3: copy once here; both trimming functions operate inplace on that single copy
+    clean_graph = clean_graph.copy()
+    collect_border_vicinity_edges(clean_graph, vasculature_segmentation.shape, inplace=True)
     if exclusion_mask_xy is not None:
-        clean_graph = collect_exclusion_zone_edges(clean_graph, exclusion_mask_xy)
+        collect_exclusion_zone_edges(clean_graph, exclusion_mask_xy, inplace=True)
     isolated_nodes = [node for node in clean_graph.nodes() if clean_graph.degree[node] == 0]
     if isolated_nodes:
         clean_graph.remove_nodes_from(isolated_nodes)
