@@ -1,5 +1,6 @@
 from typing import Literal, Dict, List
 import argparse
+import time
 import numpy as np
 import pandas as pd
 import napari
@@ -71,6 +72,11 @@ class VascuMap:
         self._pixels_to_remove = None
         self._exclusion_mask_xy_aligned = None
         self._resized_organoid_mask_pre_trim = None  # cached after model_inference
+        self._t_device_seg = 0.0
+        self._t_preprocess = 0.0
+        self._t_inference = 0.0
+        self._t_analysis = 0.0
+        self._t_total = 0.0
         self.image_source_path = image_source_path
         self.image_index = int(image_index) if image_index is not None else 0
         self.hough_line_length = int(hough_line_length)
@@ -93,12 +99,15 @@ class VascuMap:
 
             self.app = DeviceSegmentationApp(enable_gui=False, line_length=self.hough_line_length)
             self.app.channel = int(channel)
+            _t_dev_seg_start = time.time()
             outputs = self.app.run_automatic(
                 image_source=src,
                 image_index=int(image_index),
                 device_width_um=float(device_width_um),
                 mask_central_region=mask_central_region,
             )
+            self._t_device_seg = time.time() - _t_dev_seg_start
+            print(f"  ⏱  Device segmentation: {self._t_device_seg:.1f}s")
             self.cropped_stack, self.device_width_um, self.pixel_size_um, self.z_votes, self.image_name = outputs[:5]
             if len(outputs) >= 7:
                 self.mask_central_region_enabled = bool(outputs[5])
@@ -431,13 +440,24 @@ class VascuMap:
                     return
 
         # ── Run pipeline stages ───────────────────────────────────────────
-        # (Commented out for device-segmentation-only testing)
+        _t_pipeline_start = time.time()
+
+        # ── Stage 1: z-selection + isotropic resize ──────────────────────────────
+        _t0 = time.time()
         result = self.preprocess()
         if result is None and self.cropped_stack is None:
             print(f"  ⚠ Skipping {name_prefix}: no valid z-range / cropped stack.")
             return
+        self._t_preprocess = time.time() - _t0
+        print(f"  ⏱  Stage 1 (z-select/resize): {self._t_preprocess:.1f}s")
+
+        # ── Stage 2: Translation + segmentation ──────────────────────────
+        _t0 = time.time()
         self.model_inference(device="cuda")
         self.postprocess()
+        self._t_inference = time.time() - _t0
+        print(f"  ⏱  Stage 2 (Pix2Pix + UNet): {self._t_inference:.1f}s")
+
         if self._z_start_final is None:
             print(f"  ⚠ Skipping {name_prefix}: postprocess found no strong vote planes.")
             return
@@ -453,7 +473,11 @@ class VascuMap:
             self._z_stop_final = old_z0 + trim_stop
             print(f"  Trimmed {trim_start} top / {orig_z - trim_stop} bottom over-segmented z-slices")
 
+        # ── Stage 3: Skeletonisation + analysis ──────────────────────────
+        _t0 = time.time()
         self.skeletonisation_and_analysis()
+        self._t_analysis = time.time() - _t0
+        print(f"  ⏱  Stage 3 (skeleton/graph/analysis): {self._t_analysis:.1f}s")
 
         # ── Skeleton overview plot ────────────────────────────────────────
         _app_debug = getattr(self.app, '_last_segment_debug', None) or {}
@@ -546,6 +570,10 @@ class VascuMap:
 
             print(f"  Saved all interim outputs for napari visualisation")
 
+        self._t_total = time.time() - _t_pipeline_start
+        print(f"  ⏱  Total pipeline time: {self._t_total:.1f}s  "
+              f"(device seg {self._t_device_seg:.0f}s | z-crop {self._t_preprocess:.0f}s "
+              f"| inference {self._t_inference:.0f}s | analysis {self._t_analysis:.0f}s)")
         print(f"  ✓ Done: {name_prefix}")
         
 if __name__ == "__main__":
