@@ -17,7 +17,11 @@ from scipy.spatial.distance import cdist
 from scipy.spatial import ConvexHull
 from scipy.ndimage import distance_transform_edt as edt
 from scipy import ndimage as ndi
+from scipy.ndimage import maximum_filter
 from utils import cupy_chunk_processing
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+from matplotlib.colors import Normalize
 
 
 # ---------------------------------------------------------------------------
@@ -656,10 +660,6 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
     (3) full skeleton overlay, (4) clean skeleton overlay,
     (5) pruned clean graph.
     """
-    import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
-    from matplotlib.colors import Normalize
-    from scipy.ndimage import maximum_filter
 
     skeleton = analysis_results['skeleton']
     clean_skeleton = analysis_results['skeleton_from_graph']

@@ -13,6 +13,9 @@ from skimage.morphology import disk, remove_small_objects, remove_small_holes, c
 from skimage.transform import ProjectiveTransform, warp, probabilistic_hough_line
 from scipy.ndimage import rotate, binary_dilation, binary_erosion
 from skimage.draw import line
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 def read_voxel_size_um(
     source_path: Optional[Path],
@@ -445,9 +448,6 @@ class DeviceSegmentationApp:
     def _save_segmentation_diagnostic_plot(self, name_prefix: str, out_dir: Path):
         """Save a multi-panel diagnostic PNG whenever primary device detection
         failed (either rescued by dilation or fell back to Hough)."""
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
 
         debug = self._last_segment_debug
         if debug is None:
@@ -528,9 +528,6 @@ class DeviceSegmentationApp:
     def _save_organoid_debug_plot(self, name_prefix: str, out_dir: Path):
         """Save a multi-panel diagnostic PNG showing all organoid segmentation
         steps: pre/post clipping and the binary + chosen region at each attempt."""
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
 
         dbg = self._last_organoid_debug
         if dbg is None:
@@ -927,9 +924,6 @@ class DeviceSegmentationApp:
 
         # Always generate try_all_threshold on the sigma-smoothed image
         # (already inverted for dark organoids).
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
         try:
             fig, _ = try_all_threshold(inverted, figsize=(10, 8), verbose=False)
             mode_label = "sigma-smoothed" if mode == "light" else "inverted + sigma-smoothed"

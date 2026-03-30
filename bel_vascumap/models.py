@@ -15,6 +15,7 @@ import math
 import tqdm
 import cupy as cp
 from skimage.filters import apply_hysteresis_threshold
+from utils import cupy_chunk_processing
 
 
 class Generator(nn.Module):
@@ -564,8 +565,6 @@ def process_vessel_mask(vessel_proba, ortho=False):
         vessel_out = apply_hysteresis_threshold(vessel_proba, 0.1, 0.5)
     return vessel_out
 
-
-from utils import cupy_chunk_processing
 
 def median_filter_3d_gpu(volume, size=3, chunk_size=(64, 64, 64)):
     """

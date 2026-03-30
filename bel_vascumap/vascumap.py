@@ -15,7 +15,8 @@ from warnings import filterwarnings
 
 from models import Pix2Pix, load_segmentation_model, predict_mask_ortho, process_vessel_mask
 from utils import scale, resize_dask
-from skeletonisation import clean_and_analyse, trim_segmentation, generate_skeleton_overview_plot
+from skeletonisation import clean_and_analyse, trim_segmentation, generate_skeleton_overview_plot, build_internal_pore_label_volumes, graph2image
+import pickle
 
 filterwarnings('ignore')
 
@@ -524,8 +525,6 @@ class VascuMap:
 
         # ── Extra outputs for full napari visualisation ───────────────────
         if save_all_interim:
-            from skeletonisation import build_internal_pore_label_volumes, graph2image
-            import pickle
 
             # ── Aligned cropped stack (2 µm iso) ─────────────────────────
             z0, z1, ptr = self._z_start_final, self._z_stop_final, self._pixels_to_remove
