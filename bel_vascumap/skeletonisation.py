@@ -391,6 +391,8 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
         'p90_minus_p10_sprout_and_branch_orientation_deg': np.nan,
         'median_sprout_and_branch_median_cs_area_um2': np.nan,
         'p90_minus_p10_sprout_and_branch_median_cs_area_um2': np.nan,
+        'median_sprout_and_branch_length_um': np.nan,
+        'p90_minus_p10_sprout_and_branch_length_um': np.nan,
         'median_junction_dist_nearest_junction_um': np.nan,
         'p90_minus_p10_junction_dist_nearest_junction_um': np.nan,
         'median_sprout_dist_nearest_endpoint_um': np.nan,
@@ -399,6 +401,7 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
 
     orientations_deg = []
     median_cs_areas = []
+    branch_lengths = []
     for u, v in graph.edges():
         try:
             pts = graph[u][v]['pts']
@@ -409,6 +412,8 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
 
             segment_areas = area_image[pts[:, 0], pts[:, 1], pts[:, 2]]
             median_cs_areas.append(float(np.nanmedian(segment_areas)))
+
+            branch_lengths.append(float(np.sum(np.linalg.norm(np.diff(pts_um, axis=0), axis=1))))
         except (KeyError, IndexError):
             continue
 
@@ -418,6 +423,9 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
     if len(median_cs_areas) > 0:
         summary['median_sprout_and_branch_median_cs_area_um2'] = safe_median(median_cs_areas)
         summary['p90_minus_p10_sprout_and_branch_median_cs_area_um2'] = safe_percentile_spread(median_cs_areas)
+    if len(branch_lengths) > 0:
+        summary['median_sprout_and_branch_length_um'] = safe_median(branch_lengths)
+        summary['p90_minus_p10_sprout_and_branch_length_um'] = safe_percentile_spread(branch_lengths)
 
     nodes = list(graph.nodes())
     if len(nodes) < 2:
@@ -553,12 +561,8 @@ def compute_internal_pore_headline_metrics(
 
     if not pore_slice_data:
         return {
-            'total_internal_pore_count': 0,
-            'internal_pore_area_fraction_in_filled_vascular_area': 0.0,
             'median_internal_pore_area_um2': np.nan,
             'p90_minus_p10_internal_pore_area_um2': np.nan,
-            'median_internal_pore_max_inscribed_radius_um': np.nan,
-            'p90_minus_p10_internal_pore_max_inscribed_radius_um': np.nan,
         }
 
     # ── GPU batch EDT ──────────────────────────────────────────────────────
@@ -592,12 +596,8 @@ def compute_internal_pore_headline_metrics(
     all_radii = np.concatenate(pore_radii_all)
 
     return {
-        'total_internal_pore_count': int(all_areas.size),
-        'internal_pore_area_fraction_in_filled_vascular_area': float(total_pore_area_um2 / max(total_filled_area_um2, 1e-12)),
         'median_internal_pore_area_um2': float(np.median(all_areas)),
         'p90_minus_p10_internal_pore_area_um2': float(np.percentile(all_areas, 90) - np.percentile(all_areas, 10)),
-        'median_internal_pore_max_inscribed_radius_um': float(np.median(all_radii)),
-        'p90_minus_p10_internal_pore_max_inscribed_radius_um': float(np.percentile(all_radii, 90) - np.percentile(all_radii, 10)),
     }
 
 
@@ -961,6 +961,8 @@ def clean_and_analyse(
     global_metrics['p90_minus_p10_sprout_and_branch_orientation_deg'] = np.nan
     global_metrics['median_sprout_and_branch_median_cs_area_um2'] = np.nan
     global_metrics['p90_minus_p10_sprout_and_branch_median_cs_area_um2'] = np.nan
+    global_metrics['median_sprout_and_branch_length_um'] = np.nan
+    global_metrics['p90_minus_p10_sprout_and_branch_length_um'] = np.nan
     global_metrics['median_junction_dist_nearest_junction_um'] = np.nan
     global_metrics['p90_minus_p10_junction_dist_nearest_junction_um'] = np.nan
     global_metrics['median_sprout_dist_nearest_endpoint_um'] = np.nan
@@ -1002,10 +1004,7 @@ def clean_and_analyse(
     # ---- extra density metrics ----
     global_metrics['sprouts_per_chip_volume_um_inverse3'] = safe_divide(sprouts_count, convex_hull_volume_um3)
     global_metrics['junctions_per_chip_volume_um_inverse3'] = safe_divide(branchpoints_count, convex_hull_volume_um3)
-    global_metrics['total_internal_pore_density_per_vessel_volume_um_inverse3'] = safe_divide(
-        global_metrics.get('total_internal_pore_count', np.nan),
-        vessel_volume_um3,
-    )
+
 
     global_metrics_df = pd.DataFrame([global_metrics])
     return {
