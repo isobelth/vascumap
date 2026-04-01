@@ -443,6 +443,11 @@ class DeviceSegmentationApp:
         if self._last_organoid_debug is not None:
             self._save_organoid_debug_plot(name_prefix, out_dir)
 
+        # Save Hough retry progression if multiple attempts were made
+        hough_attempts = (self._last_segment_debug or {}).get("hough_attempts")
+        if hough_attempts and len(hough_attempts) > 1:
+            self._save_hough_attempts_plot(name_prefix, out_dir, hough_attempts)
+
         return overlay_path
 
     def _save_segmentation_diagnostic_plot(self, name_prefix: str, out_dir: Path):
@@ -524,6 +529,51 @@ class DeviceSegmentationApp:
         fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
         plt.close(fig)
         print(f"  Segmentation diagnostic plot → {save_path.name}")
+
+    def _save_hough_attempts_plot(self, name_prefix: str, out_dir: Path, hough_attempts: list):
+        """Save a multi-panel PNG showing each Hough retry's reconstructed lines."""
+        n = len(hough_attempts)
+        ncols = min(n, 4)
+        nrows = 2  # top row: reconstructed lines, bottom row: combined mask
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows))
+        axes = np.atleast_2d(axes)
+
+        for col, attempt in enumerate(hough_attempts):
+            ll = attempt["line_length"]
+            lg = attempt["line_gap"]
+            idx = attempt["attempt"]
+            recon = attempt["reconstructed"]
+            mask = attempt["reconstructed_mask"]
+            corners = attempt.get("corners")
+
+            # Top row: reconstructed Hough lines only
+            ax_top = axes[0, col]
+            ax_top.imshow(recon, cmap="gray", aspect="equal")
+            ax_top.set_title(f"Attempt {idx}\nll={ll}, lg={lg}", fontsize=10)
+            ax_top.axis("off")
+
+            # Bottom row: combined mask with corners overlay
+            ax_bot = axes[1, col]
+            ax_bot.imshow(mask, cmap="gray", aspect="equal")
+            if corners is not None:
+                pts = np.asarray(corners)
+                closed_pts = np.vstack([pts, pts[0:1]])
+                ax_bot.plot(closed_pts[:, 0], closed_pts[:, 1], "r-", linewidth=2)
+            ax_bot.set_title("Combined mask" + (" ✓" if corners is not None else " ✗"), fontsize=10)
+            ax_bot.axis("off")
+
+        # Hide unused columns if fewer than ncols attempts
+        for col in range(n, ncols):
+            axes[0, col].axis("off")
+            axes[1, col].axis("off")
+
+        fig.suptitle(f"Hough probabilistic line retries — {name_prefix}", fontsize=13)
+        plt.tight_layout()
+        save_path = Path(out_dir) / f"{name_prefix}_hough_retries.png"
+        fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Hough retries plot → {save_path.name}")
 
     def _save_organoid_debug_plot(self, name_prefix: str, out_dir: Path):
         """Save a multi-panel diagnostic PNG showing all organoid segmentation
@@ -1156,6 +1206,7 @@ class DeviceSegmentationApp:
         new_corners = new_angle_rad = new_centroid_xy = None
         rescue_closed_mask = None
         rescue_radius = None
+        hough_attempts_log = []
 
         corners, angle_rad, centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(device_mask)
         # Check if device mask itself touches the image border (more reliable
@@ -1211,27 +1262,51 @@ class DeviceSegmentationApp:
                     break
 
             # Step 2: Hough fallback — only if dilation rescue failed.
+            #         Retry with +100 line_length/line_gap if corners still touch borders.
             if not rescued:
                 self._hough_fallback_used = True
                 print(f"  [Hough fallback] Primary device detection failed ({reason}) — using probabilistic Hough lines")
                 edges = remove_small_objects(labels_to_dilate > 0)
-                segs = probabilistic_hough_line(
-                    edges,
-                    line_length=self.line_length,
-                    line_gap=self.line_gap,
-                    threshold=self.hough_threshold,
-                )
-                reconstructed = np.zeros_like(edges, dtype=bool)
-                for (x0, y0), (x1, y1) in segs:
-                    rr, cc = line(y0, x0, y1, x1)
-                    reconstructed[rr, cc] = True
 
-                reconstructed_mask = np.logical_or(reconstructed, post_dilation_mask)
-                updated_clean_labels = label(~reconstructed_mask)
-                props = regionprops(updated_clean_labels)
-                largest_prop = max(props, key=lambda p: p.area)
-                new_device_mask = updated_clean_labels == largest_prop.label
-                new_corners, new_angle_rad, new_centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(new_device_mask)
+                ll = self.line_length
+                lg = self.line_gap
+                lt = self.hough_threshold
+                for hough_attempt in range(4):
+                    if hough_attempt > 0:
+                        ll += 150
+                        lg += 150
+                        lt -= 20
+                        print(f"  [Hough retry {hough_attempt}] Increasing line_length={ll}, line_gap={lg}")
+
+                    segs = probabilistic_hough_line(
+                        edges,
+                        line_length=ll,
+                        line_gap=lg,
+                        threshold=lt,
+                    )
+                    reconstructed = np.zeros_like(edges, dtype=bool)
+                    for (x0, y0), (x1, y1) in segs:
+                        rr, cc = line(y0, x0, y1, x1)
+                        reconstructed[rr, cc] = True
+
+                    reconstructed_mask = np.logical_or(reconstructed, post_dilation_mask)
+                    updated_clean_labels = label(~reconstructed_mask)
+                    props = regionprops(updated_clean_labels)
+                    largest_prop = max(props, key=lambda p: p.area)
+                    new_device_mask = updated_clean_labels == largest_prop.label
+                    new_corners, new_angle_rad, new_centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(new_device_mask)
+
+                    hough_attempts_log.append({
+                        "attempt": hough_attempt,
+                        "line_length": ll,
+                        "line_gap": lg,
+                        "reconstructed": reconstructed.copy(),
+                        "reconstructed_mask": reconstructed_mask.copy(),
+                        "corners": new_corners,
+                    })
+
+                    if new_corners is not None and not self._corners_touch_border(new_corners, new_device_mask.shape, margin=5):
+                        break
 
         if flag:
             final_corners = new_corners
@@ -1258,6 +1333,7 @@ class DeviceSegmentationApp:
                 "reconstructed_mask": reconstructed_mask,
                 "rescue_closed_mask": rescue_closed_mask,
                 "rescue_radius": rescue_radius,
+                "hough_attempts": hough_attempts_log if hough_attempts_log else None,
                 "flag": flag,
                 "final_corners": final_corners,
                 "final_centroid_xy": final_centroid_xy,

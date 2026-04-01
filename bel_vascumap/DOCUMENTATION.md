@@ -119,7 +119,7 @@ vm = VascuMap(
     image_index: int = 0,
     device_width_um: float = 35.0,
     mask_central_region: bool = False,
-    channel: int = 0,
+    brightfield_channel: int = 0,
 )
 ```
 

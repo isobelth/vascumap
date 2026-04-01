@@ -31,7 +31,7 @@ class VascuMap:
         device_width_um: float = 35.0,
         hough_line_length: int = 400,
         mask_central_region = False,
-        channel: int = 0,
+        brightfield_channel: int = 0,
         model_p2p=None,
         model_unet=None,
     ) -> None:
@@ -99,7 +99,7 @@ class VascuMap:
                 raise ValueError("image_source_path must exist and be a .tif/.tiff/.lif file.")
 
             self.app = DeviceSegmentationApp(enable_gui=False, line_length=self.hough_line_length)
-            self.app.channel = int(channel)
+            self.app.channel = int(brightfield_channel)
             _t_dev_seg_start = time.time()
             outputs = self.app.run_automatic(
                 image_source=src,
