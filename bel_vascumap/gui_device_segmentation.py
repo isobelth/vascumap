@@ -1235,8 +1235,8 @@ class DeviceSegmentationApp:
         labels_to_dilate = util.map_array(labels, data["label"], data["label"] * condition)
 
         dilated_output = np.zeros_like(labels, dtype=np.uint8)
-        base_selem = np.zeros((31, 31), dtype=bool)
-        base_selem[15, :] = 1
+        base_selem = np.zeros((71, 71), dtype=bool)
+        base_selem[35, :] = 1
         pad = base_selem.shape[0] // 2
 
         for region in regionprops(labels_to_dilate):
