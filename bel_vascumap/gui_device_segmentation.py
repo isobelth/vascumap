@@ -172,7 +172,7 @@ class DeviceSegmentationApp:
         typical_pct: float = 50.0,
         line_length: int = 100,
         line_gap: int = 300,
-        hough_threshold: int = 100,
+        hough_threshold: int = 70,
         mask_sigma: float = 5.0,
         mask_frac_thresh: float = 0.40,
     ):

@@ -451,125 +451,125 @@ class VascuMap:
         self._t_preprocess = time.time() - _t0
         print(f"  ⏱  Stage 1 (z-select/resize): {self._t_preprocess:.1f}s")
 
-        # ── Stage 2: Translation + segmentation ──────────────────────────
-        _t0 = time.time()
-        self.model_inference(device="cuda")
-        self.postprocess()
-        self._t_inference = time.time() - _t0
-        print(f"  ⏱  Stage 2 (Pix2Pix + UNet): {self._t_inference:.1f}s")
+        # # ── Stage 2: Translation + segmentation ──────────────────────────
+        # _t0 = time.time()
+        # self.model_inference(device="cuda")
+        # self.postprocess()
+        # self._t_inference = time.time() - _t0
+        # print(f"  ⏱  Stage 2 (Pix2Pix + UNet): {self._t_inference:.1f}s")
 
-        if self._z_start_final is None:
-            print(f"  ⚠ Skipping {name_prefix}: postprocess found no strong vote planes.")
-            return
+        # if self._z_start_final is None:
+        #     print(f"  ⚠ Skipping {name_prefix}: postprocess found no strong vote planes.")
+        #     return
 
-        # ── Trim over-segmented edge slices ──────────────────────────────
-        orig_z = self.vessel_mask_iso.shape[0]
-        trimmed, trim_start, trim_stop = trim_segmentation(self.vessel_mask_iso)
-        if trim_start > 0 or trim_stop < orig_z:
-            old_z0 = self._z_start_final
-            self.vessel_mask_iso = trimmed
-            self.vessel_pred_iso = self.vessel_pred_iso[trim_start:trim_stop]
-            self._z_start_final = old_z0 + trim_start
-            self._z_stop_final = old_z0 + trim_stop
-            print(f"  Trimmed {trim_start} top / {orig_z - trim_stop} bottom over-segmented z-slices")
+        # # ── Trim over-segmented edge slices ──────────────────────────────
+        # orig_z = self.vessel_mask_iso.shape[0]
+        # trimmed, trim_start, trim_stop = trim_segmentation(self.vessel_mask_iso)
+        # if trim_start > 0 or trim_stop < orig_z:
+        #     old_z0 = self._z_start_final
+        #     self.vessel_mask_iso = trimmed
+        #     self.vessel_pred_iso = self.vessel_pred_iso[trim_start:trim_stop]
+        #     self._z_start_final = old_z0 + trim_start
+        #     self._z_stop_final = old_z0 + trim_stop
+        #     print(f"  Trimmed {trim_start} top / {orig_z - trim_stop} bottom over-segmented z-slices")
 
-        # ── Stage 3: Skeletonisation + analysis ──────────────────────────
-        _t0 = time.time()
-        self.skeletonisation_and_analysis()
-        self._t_analysis = time.time() - _t0
-        print(f"  ⏱  Stage 3 (skeleton/graph/analysis): {self._t_analysis:.1f}s")
+        # # ── Stage 3: Skeletonisation + analysis ──────────────────────────
+        # _t0 = time.time()
+        # self.skeletonisation_and_analysis()
+        # self._t_analysis = time.time() - _t0
+        # print(f"  ⏱  Stage 3 (skeleton/graph/analysis): {self._t_analysis:.1f}s")
 
-        # ── Skeleton overview plot ────────────────────────────────────────
-        _app_debug = getattr(self.app, '_last_segment_debug', None) or {}
-        generate_skeleton_overview_plot(
-            self.vessel_mask_iso,
-            self.analysis_results,
-            title=name_prefix,
-            save_path=str(out / f"{name_prefix}_skeleton_overview.png"),
-            brightfield_stack=self.cropped_stack,
-            organoid_mask_xy=self.cropped_organoid_mask_xy,
-            brightfield_full=getattr(self.app, '_last_image', None),
-            device_corners_xy=_app_debug.get('final_corners'),
-            organoid_mask_full_xy=getattr(self.app, '_last_organoid_region', None),
-        )
-        print(f"  Skeleton overview → {name_prefix}_skeleton_overview.png")
+        # # ── Skeleton overview plot ────────────────────────────────────────
+        # _app_debug = getattr(self.app, '_last_segment_debug', None) or {}
+        # generate_skeleton_overview_plot(
+        #     self.vessel_mask_iso,
+        #     self.analysis_results,
+        #     title=name_prefix,
+        #     save_path=str(out / f"{name_prefix}_skeleton_overview.png"),
+        #     brightfield_stack=self.cropped_stack,
+        #     organoid_mask_xy=self.cropped_organoid_mask_xy,
+        #     brightfield_full=getattr(self.app, '_last_image', None),
+        #     device_corners_xy=_app_debug.get('final_corners'),
+        #     organoid_mask_full_xy=getattr(self.app, '_last_organoid_region', None),
+        # )
+        # print(f"  Skeleton overview → {name_prefix}_skeleton_overview.png")
 
-        # ── Metrics CSV (always saved) ────────────────────────────────────
-        ar = self.analysis_results
-        metrics_df = ar['global_metrics_df'].copy()
-        # Prepend identification columns
-        src = Path(self.image_source_path) if self.image_source_path else None
-        metrics_df.insert(0, 'image_name', name_prefix)
-        metrics_df.insert(1, 'source_file', src.name if src else '')
-        metrics_df.insert(2, 'image_index', int(self.image_index))
-        metrics_df.to_csv(str(out / f"{name_prefix}_analysis_metrics.csv"), index=False)
-        print(f"  Metrics → {name_prefix}_analysis_metrics.csv")
+        # # ── Metrics CSV (always saved) ────────────────────────────────────
+        # ar = self.analysis_results
+        # metrics_df = ar['global_metrics_df'].copy()
+        # # Prepend identification columns
+        # src = Path(self.image_source_path) if self.image_source_path else None
+        # metrics_df.insert(0, 'image_name', name_prefix)
+        # metrics_df.insert(1, 'source_file', src.name if src else '')
+        # metrics_df.insert(2, 'image_index', int(self.image_index))
+        # metrics_df.to_csv(str(out / f"{name_prefix}_analysis_metrics.csv"), index=False)
+        # print(f"  Metrics → {name_prefix}_analysis_metrics.csv")
 
-        # ── Branch-level metrics CSV (always saved) ──────────────────────
-        branch_df = ar.get('branch_metrics_df', pd.DataFrame()).copy()
-        if branch_df is not None and not branch_df.empty:
-            branch_df.insert(0, 'image_name', name_prefix)
-            branch_df.insert(1, 'source_file', src.name if src else '')
-            branch_df.insert(2, 'image_index', int(self.image_index))
-            branch_df.to_csv(str(out / f"{name_prefix}_branch_metrics.csv"), index=False)
-            print(f"  Branch metrics → {name_prefix}_branch_metrics.csv")
-        else:
-            # still write an empty schema-consistent file for downstream joins
-            branch_df = branch_df if isinstance(branch_df, pd.DataFrame) else pd.DataFrame()
-            branch_df.insert(0, 'image_name', name_prefix)
-            branch_df.insert(1, 'source_file', src.name if src else '')
-            branch_df.insert(2, 'image_index', int(self.image_index))
-            branch_df.to_csv(str(out / f"{name_prefix}_branch_metrics.csv"), index=False)
-            print(f"  Branch metrics → {name_prefix}_branch_metrics.csv (empty)")
+        # # ── Branch-level metrics CSV (always saved) ──────────────────────
+        # branch_df = ar.get('branch_metrics_df', pd.DataFrame()).copy()
+        # if branch_df is not None and not branch_df.empty:
+        #     branch_df.insert(0, 'image_name', name_prefix)
+        #     branch_df.insert(1, 'source_file', src.name if src else '')
+        #     branch_df.insert(2, 'image_index', int(self.image_index))
+        #     branch_df.to_csv(str(out / f"{name_prefix}_branch_metrics.csv"), index=False)
+        #     print(f"  Branch metrics → {name_prefix}_branch_metrics.csv")
+        # else:
+        #     # still write an empty schema-consistent file for downstream joins
+        #     branch_df = branch_df if isinstance(branch_df, pd.DataFrame) else pd.DataFrame()
+        #     branch_df.insert(0, 'image_name', name_prefix)
+        #     branch_df.insert(1, 'source_file', src.name if src else '')
+        #     branch_df.insert(2, 'image_index', int(self.image_index))
+        #     branch_df.to_csv(str(out / f"{name_prefix}_branch_metrics.csv"), index=False)
+        #     print(f"  Branch metrics → {name_prefix}_branch_metrics.csv (empty)")
 
-        # ── Extra outputs for full napari visualisation ───────────────────
-        if save_all_interim:
+        # # ── Extra outputs for full napari visualisation ───────────────────
+        # if save_all_interim:
 
-            # ── Aligned cropped stack (2 µm iso) ─────────────────────────
-            z0, z1, ptr = self._z_start_final, self._z_stop_final, self._pixels_to_remove
-            if z0 is not None and z1 is not None and ptr is not None:
-                cropped_stack_iso = resize_dask(self.cropped_stack, [2.5, 1, 1])
-                H, W = cropped_stack_iso.shape[1], cropped_stack_iso.shape[2]
-                cropped_stack_aligned = cropped_stack_iso[z0:z1, ptr:H - ptr, ptr:W - ptr]
-                np.save(str(out / f"{name_prefix}_cropped_stack_aligned.npy"), cropped_stack_aligned)
-                print(f"  Aligned 3-D shape: {cropped_stack_aligned.shape}  (2 µm iso)")
+        #     # ── Aligned cropped stack (2 µm iso) ─────────────────────────
+        #     z0, z1, ptr = self._z_start_final, self._z_stop_final, self._pixels_to_remove
+        #     if z0 is not None and z1 is not None and ptr is not None:
+        #         cropped_stack_iso = resize_dask(self.cropped_stack, [2.5, 1, 1])
+        #         H, W = cropped_stack_iso.shape[1], cropped_stack_iso.shape[2]
+        #         cropped_stack_aligned = cropped_stack_iso[z0:z1, ptr:H - ptr, ptr:W - ptr]
+        #         np.save(str(out / f"{name_prefix}_cropped_stack_aligned.npy"), cropped_stack_aligned)
+        #         print(f"  Aligned 3-D shape: {cropped_stack_aligned.shape}  (2 µm iso)")
 
-            np.save(str(out / f"{name_prefix}_vessel_translation_aligned.npy"), self.vessel_pred_iso)
-            np.save(str(out / f"{name_prefix}_clean_segmentation.npy"), ar["clean_segmentation"])
-            np.save(str(out / f"{name_prefix}_skeleton.npy"), ar["skeleton_from_graph"])
+        #     np.save(str(out / f"{name_prefix}_vessel_translation_aligned.npy"), self.vessel_pred_iso)
+        #     np.save(str(out / f"{name_prefix}_clean_segmentation.npy"), ar["clean_segmentation"])
+        #     np.save(str(out / f"{name_prefix}_skeleton.npy"), ar["skeleton_from_graph"])
 
-            if self._exclusion_mask_xy_aligned is not None:
-                np.save(str(out / f"{name_prefix}_organoid_mask.npy"),
-                        self._exclusion_mask_xy_aligned.astype(np.uint8))
+        #     if self._exclusion_mask_xy_aligned is not None:
+        #         np.save(str(out / f"{name_prefix}_organoid_mask.npy"),
+        #                 self._exclusion_mask_xy_aligned.astype(np.uint8))
 
-            seg = ar["clean_segmentation"].astype(bool)
-            holes, hole_labels, hole_dist = build_internal_pore_label_volumes(
-                seg, voxel_size_um=(2.0, 2.0, 2.0), max_pore_area_fraction_of_slice=0.10,
-            )
-            full_skel = graph2image(ar["graph"], self.vessel_mask_iso.shape).astype(np.int32)
+        #     seg = ar["clean_segmentation"].astype(bool)
+        #     holes, hole_labels, hole_dist = build_internal_pore_label_volumes(
+        #         seg, voxel_size_um=(2.0, 2.0, 2.0), max_pore_area_fraction_of_slice=0.10,
+        #     )
+        #     full_skel = graph2image(ar["graph"], self.vessel_mask_iso.shape).astype(np.int32)
 
-            np.save(str(out / f"{name_prefix}_holes.npy"), holes)
-            np.save(str(out / f"{name_prefix}_hole_labels_per_slice.npy"), hole_labels)
-            np.save(str(out / f"{name_prefix}_hole_distance_per_slice_um.npy"), hole_dist)
-            np.save(str(out / f"{name_prefix}_full_graph_skeleton.npy"), full_skel)
-            np.save(str(out / f"{name_prefix}_vessel_mask.npy"), self.vessel_mask_iso)
+        #     np.save(str(out / f"{name_prefix}_holes.npy"), holes)
+        #     np.save(str(out / f"{name_prefix}_hole_labels_per_slice.npy"), hole_labels)
+        #     np.save(str(out / f"{name_prefix}_hole_distance_per_slice_um.npy"), hole_dist)
+        #     np.save(str(out / f"{name_prefix}_full_graph_skeleton.npy"), full_skel)
+        #     np.save(str(out / f"{name_prefix}_vessel_mask.npy"), self.vessel_mask_iso)
 
-            # Graph node coordinates (sprout vs junction) as .npz
-            clean_graph = ar["clean_graph"]
-            node_ids = list(clean_graph.nodes())
-            if node_ids:
-                pts = np.array([clean_graph.nodes[n]['pts'] for n in node_ids], dtype=float)
-                is_sprout = np.array([bool(clean_graph.nodes[n].get('sprout', False)) for n in node_ids])
-                np.savez(str(out / f"{name_prefix}_graph_nodes.npz"),
-                         pts=pts, is_sprout=is_sprout)
+        #     # Graph node coordinates (sprout vs junction) as .npz
+        #     clean_graph = ar["clean_graph"]
+        #     node_ids = list(clean_graph.nodes())
+        #     if node_ids:
+        #         pts = np.array([clean_graph.nodes[n]['pts'] for n in node_ids], dtype=float)
+        #         is_sprout = np.array([bool(clean_graph.nodes[n].get('sprout', False)) for n in node_ids])
+        #         np.savez(str(out / f"{name_prefix}_graph_nodes.npz"),
+        #                  pts=pts, is_sprout=is_sprout)
 
-            with open(str(out / f"{name_prefix}_clean_graph.pkl"), "wb") as f:
-                pickle.dump(clean_graph, f)
+        #     with open(str(out / f"{name_prefix}_clean_graph.pkl"), "wb") as f:
+        #         pickle.dump(clean_graph, f)
 
-            print(f"  Saved all interim outputs for napari visualisation")
+        #     print(f"  Saved all interim outputs for napari visualisation")
 
-        self._t_total = time.time() - _t_pipeline_start
-        print(f"  ⏱  Total pipeline time: {self._t_total:.1f}s  "
-              f"(device seg {self._t_device_seg:.0f}s | z-crop {self._t_preprocess:.0f}s "
-              f"| inference {self._t_inference:.0f}s | analysis {self._t_analysis:.0f}s)")
+        # self._t_total = time.time() - _t_pipeline_start
+        # print(f"  ⏱  Total pipeline time: {self._t_total:.1f}s  "
+        #       f"(device seg {self._t_device_seg:.0f}s | z-crop {self._t_preprocess:.0f}s "
+        #       f"| inference {self._t_inference:.0f}s | analysis {self._t_analysis:.0f}s)")
         print(f"  ✓ Done: {name_prefix}")
