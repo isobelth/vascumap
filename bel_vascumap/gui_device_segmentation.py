@@ -170,9 +170,9 @@ class DeviceSegmentationApp:
         bin_size: float = 2.0,
         min_run_frac: float = 0.25,
         typical_pct: float = 50.0,
-        line_length: int = 300,
-        line_gap: int = 200,
-        hough_threshold: int = 70,
+        line_length: int = 100,
+        line_gap: int = 300,
+        hough_threshold: int = 100,
         mask_sigma: float = 5.0,
         mask_frac_thresh: float = 0.40,
     ):
@@ -443,9 +443,9 @@ class DeviceSegmentationApp:
         if self._last_organoid_debug is not None:
             self._save_organoid_debug_plot(name_prefix, out_dir)
 
-        # Save Hough retry progression if multiple attempts were made
+        # Save Hough retry progression whenever Hough fallback was used
         hough_attempts = (self._last_segment_debug or {}).get("hough_attempts")
-        if hough_attempts and len(hough_attempts) > 1:
+        if hough_attempts:
             self._save_hough_attempts_plot(name_prefix, out_dir, hough_attempts)
 
         return overlay_path
@@ -531,42 +531,108 @@ class DeviceSegmentationApp:
         print(f"  Segmentation diagnostic plot → {save_path.name}")
 
     def _save_hough_attempts_plot(self, name_prefix: str, out_dir: Path, hough_attempts: list):
-        """Save a multi-panel PNG showing each Hough retry's reconstructed lines."""
+        """Save a multi-panel PNG showing each Hough retry's diagnostics.
+
+        Rows:
+          1. Reconstructed Hough lines only
+          2. Combined mask (lines + edges) with oriented-rect corners
+          3. Device mask (largest enclosed region) with oriented-rect corners
+          4. Text panel with diagnostic numbers
+        """
         n = len(hough_attempts)
         ncols = min(n, 4)
-        nrows = 2  # top row: reconstructed lines, bottom row: combined mask
+        nrows = 4
 
         fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows))
         axes = np.atleast_2d(axes)
+        if ncols == 1:
+            axes = axes.reshape(nrows, 1)
 
         for col, attempt in enumerate(hough_attempts):
             ll = attempt["line_length"]
             lg = attempt["line_gap"]
+            lt = attempt.get("threshold", "?")
             idx = attempt["attempt"]
             recon = attempt["reconstructed"]
             mask = attempt["reconstructed_mask"]
+            device_mask = attempt.get("device_mask")
             corners = attempt.get("corners")
+            corners_touch = attempt.get("corners_touch_border", None)
+            mask_touches = attempt.get("mask_touches_border", None)
+            area_frac = attempt.get("device_area_frac", None)
+            n_segs = attempt.get("n_hough_segments", None)
+            n_regions = attempt.get("n_regions", None)
 
-            # Top row: reconstructed Hough lines only
+            # --- Row 1: reconstructed Hough lines only ---
             ax_top = axes[0, col]
             ax_top.imshow(recon, cmap="gray", aspect="equal")
-            ax_top.set_title(f"Attempt {idx}\nll={ll}, lg={lg}", fontsize=10)
+            ax_top.set_title(
+                f"Attempt {idx}\nll={ll}, lg={lg}, thr={lt}"
+                + (f"\n{n_segs} segments" if n_segs is not None else ""),
+                fontsize=10,
+            )
             ax_top.axis("off")
 
-            # Bottom row: combined mask with corners overlay
-            ax_bot = axes[1, col]
-            ax_bot.imshow(mask, cmap="gray", aspect="equal")
+            # --- Row 2: combined mask with corners ---
+            ax_mask = axes[1, col]
+            ax_mask.imshow(mask, cmap="gray", aspect="equal")
             if corners is not None:
                 pts = np.asarray(corners)
                 closed_pts = np.vstack([pts, pts[0:1]])
-                ax_bot.plot(closed_pts[:, 0], closed_pts[:, 1], "r-", linewidth=2)
-            ax_bot.set_title("Combined mask" + (" ✓" if corners is not None else " ✗"), fontsize=10)
-            ax_bot.axis("off")
+                color = "r" if corners_touch else "lime"
+                ax_mask.plot(closed_pts[:, 0], closed_pts[:, 1], color=color, linewidth=2)
+            status = "✓" if (corners is not None and not corners_touch) else "✗"
+            ax_mask.set_title(f"Combined mask {status}", fontsize=10)
+            ax_mask.axis("off")
+
+            # --- Row 3: device mask with corners ---
+            ax_dev = axes[2, col]
+            if device_mask is not None:
+                ax_dev.imshow(device_mask, cmap="gray", aspect="equal")
+                if corners is not None:
+                    pts = np.asarray(corners)
+                    closed_pts = np.vstack([pts, pts[0:1]])
+                    color = "r" if corners_touch else "lime"
+                    ax_dev.plot(closed_pts[:, 0], closed_pts[:, 1], color=color, linewidth=2)
+            else:
+                ax_dev.text(0.5, 0.5, "N/A", ha="center", va="center", fontsize=14, transform=ax_dev.transAxes)
+            dm_status = ""
+            if mask_touches is not None:
+                dm_status = " (mask touches border)" if mask_touches else " (interior)"
+            ax_dev.set_title(f"Device mask{dm_status}", fontsize=10)
+            ax_dev.axis("off")
+
+            # --- Row 4: text diagnostics ---
+            ax_txt = axes[3, col]
+            ax_txt.axis("off")
+            lines = []
+            lines.append(f"Hough threshold: {lt}")
+            if n_segs is not None:
+                lines.append(f"Hough segments: {n_segs}")
+            if n_regions is not None:
+                lines.append(f"Regions in inverted mask: {n_regions}")
+            if area_frac is not None:
+                lines.append(f"Device area: {area_frac:.1%} of image")
+            if mask_touches is not None:
+                lines.append(f"Mask touches border: {mask_touches}")
+            if corners_touch is not None:
+                lines.append(f"Corners touch border: {corners_touch}")
+            if corners is not None:
+                for ci, (cx, cy) in enumerate(np.asarray(corners)):
+                    lines.append(f"  corner {ci}: ({cx:.0f}, {cy:.0f})")
+            else:
+                lines.append("Corners: None")
+            ax_txt.text(
+                0.05, 0.95, "\n".join(lines),
+                transform=ax_txt.transAxes, fontsize=9,
+                verticalalignment="top", fontfamily="monospace",
+            )
+            ax_txt.set_title("Diagnostics", fontsize=10)
 
         # Hide unused columns if fewer than ncols attempts
         for col in range(n, ncols):
-            axes[0, col].axis("off")
-            axes[1, col].axis("off")
+            for row in range(nrows):
+                axes[row, col].axis("off")
 
         fig.suptitle(f"Hough probabilistic line retries — {name_prefix}", fontsize=13)
         plt.tight_layout()
@@ -1086,9 +1152,7 @@ class DeviceSegmentationApp:
 
         typical_width = float(np.percentile(widths_s, self.typical_pct))
         low_thr = self.low_frac * typical_width
-        high_thr = self.high_frac * typical_width
-        keep = (~(widths_s < low_thr)) & (~(widths_s > high_thr))
-        too_wide = widths_s > high_thr
+        keep = widths_s >= low_thr
 
         best_start = best_end = None
         best_len = 0
@@ -1125,20 +1189,13 @@ class DeviceSegmentationApp:
         if best_start is None or best_len < min_run_bins:
             long_min = float(long.min())
             long_max = float(long.max())
-            crop_width = False
         else:
             long_min = float(best_start * self.bin_size)
             long_max = float((best_end + 1) * self.bin_size)
-            band_mask_bins = (bins >= best_start) & (bins <= best_end)
-            crop_width = bool(np.any(too_wide & (~band_mask_bins)))
 
         in_long_band = (long >= long_min) & (long <= long_max)
-        if crop_width:
-            short_min_use = float(short[in_long_band].min())
-            short_max_use = float(short[in_long_band].max())
-        else:
-            short_min_use = short_min_full
-            short_max_use = short_max_full
+        short_min_use = float(short[in_long_band].min()) if in_long_band.any() else short_min_full
+        short_max_use = float(short[in_long_band].max()) if in_long_band.any() else short_max_full
 
         if long_name == "v":
             umin, umax = short_min_use, short_max_use
@@ -1266,16 +1323,16 @@ class DeviceSegmentationApp:
             if not rescued:
                 self._hough_fallback_used = True
                 print(f"  [Hough fallback] Primary device detection failed ({reason}) — using probabilistic Hough lines")
-                edges = remove_small_objects(labels_to_dilate > 0)
+                edges = post_dilation_mask
 
                 ll = self.line_length
                 lg = self.line_gap
                 lt = self.hough_threshold
                 for hough_attempt in range(4):
                     if hough_attempt > 0:
-                        ll += 150
-                        lg += 150
-                        lt -= 20
+                        ll += 0
+                        lg += 100
+                        lt += 0
                         print(f"  [Hough retry {hough_attempt}] Increasing line_length={ll}, line_gap={lg}")
 
                     segs = probabilistic_hough_line(
@@ -1288,6 +1345,9 @@ class DeviceSegmentationApp:
                     for (x0, y0), (x1, y1) in segs:
                         rr, cc = line(y0, x0, y1, x1)
                         reconstructed[rr, cc] = True
+                    # Dilate lines so they are thick enough to sever regions
+                    # under 8-connectivity labelling.
+                    reconstructed = binary_dilation(reconstructed, structure=disk(1))
 
                     reconstructed_mask = np.logical_or(reconstructed, post_dilation_mask)
                     updated_clean_labels = label(~reconstructed_mask)
@@ -1296,16 +1356,36 @@ class DeviceSegmentationApp:
                     new_device_mask = updated_clean_labels == largest_prop.label
                     new_corners, new_angle_rad, new_centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(new_device_mask)
 
+                    # Diagnostic checks for this attempt
+                    h_dm, w_dm = new_device_mask.shape
+                    mask_touches = (
+                        new_device_mask[0, :].any() or new_device_mask[-1, :].any() or
+                        new_device_mask[:, 0].any() or new_device_mask[:, -1].any()
+                    )
+                    corners_touch = (
+                        new_corners is not None and
+                        self._corners_touch_border(new_corners, new_device_mask.shape, margin=5)
+                    )
+                    device_area_frac = float(new_device_mask.sum()) / (h_dm * w_dm)
+                    n_regions = len(props)
+
                     hough_attempts_log.append({
                         "attempt": hough_attempt,
                         "line_length": ll,
                         "line_gap": lg,
+                        "threshold": lt,
+                        "n_hough_segments": len(segs),
                         "reconstructed": reconstructed.copy(),
                         "reconstructed_mask": reconstructed_mask.copy(),
+                        "device_mask": new_device_mask.copy(),
                         "corners": new_corners,
+                        "corners_touch_border": corners_touch,
+                        "mask_touches_border": mask_touches,
+                        "device_area_frac": device_area_frac,
+                        "n_regions": n_regions,
                     })
 
-                    if new_corners is not None and not self._corners_touch_border(new_corners, new_device_mask.shape, margin=5):
+                    if new_corners is not None and not corners_touch:
                         break
 
         if flag:
