@@ -1333,7 +1333,7 @@ class DeviceSegmentationApp:
                     if hough_attempt > 0:
                         ll += 0
                         lg += 100
-                        lt += 20
+                        lt += 5
                         print(f"  [Hough retry {hough_attempt}] Increasing line_length={ll}, line_gap={lg}")
 
                     segs = probabilistic_hough_line(
