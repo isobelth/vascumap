@@ -33,6 +33,7 @@ class VascuMap:
         brightfield_channel: int = 0,
         model_p2p=None,
         model_unet=None,
+        failure_output_dir: str | None = None,
     ) -> None:
         """Initialize the VascuMap workflow container.
 
@@ -105,6 +106,7 @@ class VascuMap:
                 image_index=int(image_index),
                 device_width_um=float(device_width_um),
                 mask_central_region=mask_central_region,
+                failure_output_dir=Path(failure_output_dir) if failure_output_dir else None,
             )
             self._t_device_seg = time.time() - _t_dev_seg_start
             print(f"  ⏱  Device segmentation: {self._t_device_seg:.1f}s")
@@ -469,6 +471,29 @@ class VascuMap:
         # ── Trim over-segmented edge slices ──────────────────────────────
         orig_z = self.vessel_mask_iso.shape[0]
         trimmed, trim_start, trim_stop = trim_segmentation(self.vessel_mask_iso)
+        if trimmed.shape[0] == 0:
+            # Every z-slice exceeded the fill threshold — nothing left
+            slice_fill = self.vessel_mask_iso.astype(bool).mean(axis=(1, 2))
+            msg_lines = [
+                f"No vasculature retained for '{name_prefix}'.",
+                "",
+                "All {0} z-slices were trimmed because their segmentation fill".format(orig_z),
+                "fraction exceeded the 75% threshold (too much vasculature).",
+                "",
+                "Per-slice fill fractions:",
+            ]
+            for i, frac in enumerate(slice_fill):
+                msg_lines.append(f"  slice {i:4d}: {frac:.4f}")
+            msg_lines.append("")
+            msg_lines.append("Possible causes:")
+            msg_lines.append("  - The model over-segmented this image (e.g. noisy input).")
+            msg_lines.append("  - The device region was not cropped tightly enough.")
+            msg_lines.append("  - The z-range selection included out-of-focus planes.")
+            debug_txt = out / f"{name_prefix}_trim_failure_debug.txt"
+            debug_txt.write_text("\n".join(msg_lines), encoding="utf-8")
+            print(f"  ⚠ Skipping {name_prefix}: all z-slices trimmed (too much vasculature). "
+                  f"Debug info → {debug_txt.name}")
+            return
         if trim_start > 0 or trim_stop < orig_z:
             old_z0 = self._z_start_final
             self.vessel_mask_iso = trimmed

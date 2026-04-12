@@ -277,7 +277,7 @@ class DeviceSegmentationApp:
         typical_pct: float = 50.0,
         line_length: int = 100,
         line_gap: int = 200,
-        hough_threshold: int = 90,
+        hough_threshold: int = 120,
         mask_sigma: float = 5.0,
     ):
         self.enable_gui = bool(enable_gui)
@@ -426,6 +426,7 @@ class DeviceSegmentationApp:
         image_index: int = 0,
         device_width_um: float = 35.0,
         mask_central_region = False,
+        failure_output_dir: Optional[Path] = None,
     ):
         source = Path(image_source)
         self._list_images(source)
@@ -457,6 +458,25 @@ class DeviceSegmentationApp:
 
         if self.cropped_xyz is None:
             msg = str(getattr(self.images_output, "value", "Automatic segmentation failed."))
+            if failure_output_dir is not None:
+                fail_dir = Path(failure_output_dir)
+                fail_dir.mkdir(parents=True, exist_ok=True)
+                name = getattr(self, "image_name", None) or f"img{image_index}"
+                try:
+                    self._save_failure_diagnostic(name, fail_dir)
+                except Exception as diag_exc:
+                    print(f"  [WARN] Could not save diagnostic PNG: {diag_exc}")
+                txt_path = fail_dir / f"{name}_FAILED.txt"
+                txt_path.write_text(
+                    f"Image: {name}\n"
+                    f"Source: {source}\n"
+                    f"Image index: {image_index}\n"
+                    f"Device width (um): {device_width_um}\n"
+                    f"Mask central region: {mask_central_region}\n\n"
+                    f"Error: {msg}\n",
+                    encoding="utf-8",
+                )
+                print(f"  Failure log → {txt_path}")
             raise RuntimeError(msg)
 
         return self.get_cropped_outputs()
@@ -631,6 +651,73 @@ class DeviceSegmentationApp:
         fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
         plt.close(fig)
         print(f"  Segmentation diagnostic plot → {save_path.name}")
+
+    def _save_failure_diagnostic(self, name_prefix: str, out_dir: Path):
+        """Save a diagnostic figure when automatic device detection fails.
+
+        Shows the in-focus projection, organoid overlay, and device mask so
+        the user can see why corner detection failed.
+        """
+        debug = self._last_segment_debug
+        base = self._last_image
+        if base is None and debug is None:
+            return
+
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if base is not None and base.ndim == 3:
+            base = np.mean(base, axis=-1)
+
+        organoid = debug.get("organoid_region") if debug else None
+        device_mask = debug.get("device_mask") if debug else None
+        post_dilation = debug.get("post_dilation_mask") if debug else None
+        final_corners = debug.get("final_corners") if debug else None
+
+        fig, axes = plt.subplots(1, 3, figsize=(21, 6))
+
+        # Panel 1: in-focus projection
+        if base is not None:
+            axes[0].imshow(base, cmap="gray", aspect="equal")
+        axes[0].set_title("In-focus projection", fontsize=12)
+        axes[0].axis("off")
+
+        # Panel 2: projection + organoid overlay
+        if base is not None:
+            axes[1].imshow(base, cmap="gray", aspect="equal")
+            if organoid is not None and np.any(organoid):
+                overlay = np.zeros((*base.shape[:2], 4), dtype=np.float32)
+                overlay[organoid.astype(bool), :] = [0, 1, 1, 0.45]
+                axes[1].imshow(overlay, aspect="equal")
+                axes[1].set_title("Organoid detection (cyan overlay)", fontsize=12)
+            else:
+                axes[1].set_title("No organoid detected", fontsize=12)
+        else:
+            axes[1].set_title("No image available (crashed before focus plane)", fontsize=10, color="red")
+        axes[1].axis("off")
+
+        # Panel 3: device mask + corners
+        if device_mask is not None:
+            axes[2].imshow(device_mask.astype(np.uint8), cmap="gray", aspect="equal")
+            if final_corners is not None:
+                corners = np.asarray(final_corners)
+                closed_pts = np.vstack([corners, corners[0:1]])
+                axes[2].plot(closed_pts[:, 0], closed_pts[:, 1], "r-", linewidth=2)
+            axes[2].set_title("Device mask (corners failed)", fontsize=12)
+        elif post_dilation is not None:
+            axes[2].imshow(post_dilation.astype(np.uint8), cmap="gray", aspect="equal")
+            axes[2].set_title("Post-dilation mask (no device found)", fontsize=12)
+        else:
+            axes[2].set_title("No device mask (segmentation crashed)", fontsize=10, color="red")
+            axes[2].axis("off")
+        axes[2].axis("off")
+
+        fig.suptitle(f"FAILED device detection — {name_prefix}", fontsize=14, color="red")
+        plt.tight_layout()
+        save_path = out_dir / f"{name_prefix}_FAILED_diagnostic.png"
+        fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Failure diagnostic plot → {save_path}")
 
     def _save_hough_attempts_plot(self, name_prefix: str, out_dir: Path, hough_attempts: list):
         """Save a multi-panel PNG showing each Hough retry's diagnostics.
@@ -1225,7 +1312,7 @@ class DeviceSegmentationApp:
         if mode == "light":
             thresh = threshold_yen(smoothed)
             labelled = label(smoothed > thresh)
-            labelled = expand_labels(labelled, distance=15)
+            labelled = expand_labels(labelled, distance=20)
             props = regionprops(labelled)
 
             if len(props) > 0:
@@ -1366,14 +1453,19 @@ class DeviceSegmentationApp:
         organoid_region = labelled == best_prop.label
 
         # Union the dark result with the small light region if a 1–2 % central
-        # light object was detected in the first pass.
+        # light object was detected in the first pass, but only when they
+        # are physically adjacent (dilate one by 1 px and check overlap).
         if union_light_with_dark and light_region_mask is not None:
-            organoid_region = organoid_region | light_region_mask
-            combined_frac = np.sum(organoid_region) / xy_area
-            print(f"[organoid] union of light + dark regions: {combined_frac:.1%}")
+            touching = np.any(binary_dilation(light_region_mask) & organoid_region)
+            if touching:
+                organoid_region = organoid_region | light_region_mask
+                combined_frac = np.sum(organoid_region) / xy_area
+                print(f"[organoid] union of light + dark regions: {combined_frac:.1%}")
+            else:
+                print("[organoid] light and dark regions not touching — skipping union")
 
         dbg["final_region"] = organoid_region.copy()
-        organoid_region = remove_small_holes(organoid_region, area_threshold=5000)
+        organoid_region = remove_small_holes(organoid_region, area_threshold=10000)
         organoid_region = closing(organoid_region, disk(5))
         return organoid_region
 
@@ -1501,7 +1593,7 @@ class DeviceSegmentationApp:
             # Use an expanded organoid mask for device segmentation only —
             # removes organoid-proximal artefacts that disrupt edge detection.
             organoid_mask_for_device = expand_labels(
-                label(organoid_region), distance=20
+                label(organoid_region), distance=30
             ).astype(bool)
             binary[organoid_mask_for_device] = 0
 
@@ -1877,6 +1969,12 @@ class DeviceSegmentationApp:
                 )
         except Exception as e:
             self.images_output.value = f"[ERROR] Segmentation failed: {type(e).__name__}: {e}"
+            # Preserve partial data so _save_failure_diagnostic can still
+            # generate a PNG showing whatever was computed before the crash.
+            try:
+                self._last_image = in_focus_plane
+            except NameError:
+                pass
             return
 
         self._last_segment_debug = debug
