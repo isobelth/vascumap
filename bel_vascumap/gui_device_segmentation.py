@@ -12,7 +12,7 @@ from skimage.measure import label, regionprops_table, regionprops, moments_centr
 from skimage.morphology import disk, remove_small_objects, remove_small_holes, closing
 from skimage.segmentation import expand_labels
 from skimage.transform import ProjectiveTransform, warp, probabilistic_hough_line
-from scipy.ndimage import rotate, binary_dilation, binary_erosion
+from scipy.ndimage import rotate, binary_dilation, binary_erosion, binary_fill_holes
 from skimage.draw import line
 import matplotlib
 matplotlib.use("Agg")
@@ -275,8 +275,8 @@ class DeviceSegmentationApp:
         bin_size: float = 2.0,
         min_run_frac: float = 0.25,
         typical_pct: float = 50.0,
-        line_length: int = 100,
-        line_gap: int = 200,
+        line_length: int = 300,
+        line_gap: int = 100,
         hough_threshold: int = 120,
         mask_sigma: float = 5.0,
     ):
@@ -1172,7 +1172,7 @@ class DeviceSegmentationApp:
         return warped.astype(data.dtype)
 
     def _signed_orientation(self, region):
-        img = region.image.astype(float)
+        img = binary_fill_holes(region.image).astype(float)
         mu = moments_central(img)
         angle_rad = 0.5 * np.arctan2(2 * mu[1, 1], mu[2, 0] - mu[0, 2])
         return np.rad2deg(angle_rad)
@@ -1477,7 +1477,7 @@ class DeviceSegmentationApp:
         cx, cy = xs.mean(), ys.mean()
         centroid_xy = np.array([cx, cy], float)
 
-        mu = moments_central(mask.astype(np.uint8))
+        mu = moments_central(binary_fill_holes(mask).astype(np.uint8))
         angle_rad = 0.5 * np.arctan2(2 * mu[1, 1], (mu[0, 2] - mu[2, 0]))
 
         c, s = np.cos(angle_rad), np.sin(angle_rad)
@@ -1593,7 +1593,7 @@ class DeviceSegmentationApp:
             # Use an expanded organoid mask for device segmentation only —
             # removes organoid-proximal artefacts that disrupt edge detection.
             organoid_mask_for_device = expand_labels(
-                label(organoid_region), distance=30
+                label(organoid_region), distance=50
             ).astype(bool)
             binary[organoid_mask_for_device] = 0
 
