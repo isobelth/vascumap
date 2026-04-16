@@ -229,7 +229,7 @@ In batch mode, all `.lif`, `.tif`, and `.tiff` files in `--image-dir` are proces
 
 # 3. Device Segmentation App
 
-**Source:** `gui_device_segmentation.py`
+**Source:** `device_segmentation.py`
 
 `DeviceSegmentationApp` handles loading microscopy files, detecting the microfluidic device ROI, cropping the stack, and returning structured outputs.
 

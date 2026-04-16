@@ -337,6 +337,9 @@ def compute_branch_metrics_df(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), 
             # Volume approximation from path length and mean cross-sectional area
             branch_volume_um3 = float(mean_cs_area_um2 * path_length_um) if np.isfinite(mean_cs_area_um2) else np.nan
 
+            # Tortuosity: ratio of path length to straight-line distance
+            tortuosity = float(np.clip(path_length_um / (endpoint_distance_um + 1e-8), 1.0, 50.0))
+
             row = {
                 'node_start': int(u),
                 'node_end': int(v),
@@ -355,6 +358,7 @@ def compute_branch_metrics_df(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), 
                 'end_x_um': float(pts_um[-1, 2]),
                 'path_length_um': path_length_um,
                 'endpoint_distance_um': endpoint_distance_um,
+                'tortuosity': tortuosity,
                 'mean_cs_area_um2': mean_cs_area_um2,
                 'median_cs_area_um2': median_cs_area_um2,
                 'std_cs_area_um2': std_cs_area_um2,
@@ -372,12 +376,170 @@ def compute_branch_metrics_df(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), 
             'node_start', 'node_end', 'is_sprout',
             'start_z', 'start_y', 'start_x', 'end_z', 'end_y', 'end_x',
             'start_z_um', 'start_y_um', 'start_x_um', 'end_z_um', 'end_y_um', 'end_x_um',
-            'path_length_um', 'endpoint_distance_um',
+            'path_length_um', 'endpoint_distance_um', 'tortuosity',
             'mean_cs_area_um2', 'median_cs_area_um2', 'std_cs_area_um2',
             'mean_width_um', 'median_width_um', 'branch_volume_um3',
             'orientation_to_device_axis_deg',
         ])
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Per-junction metrics
+# ---------------------------------------------------------------------------
+
+def compute_junction_metrics_df(graph, voxel_size_um=(2.0, 2.0, 2.0), distance_threshold_um=500.0):
+    """Compute per-junction/endpoint metrics DataFrame from a cleaned vessel graph.
+
+    Returns one row per graph node with coordinates, degree, type, nearest-
+    neighbour distances (Euclidean, in µm), and neighbourhood counts.
+    """
+    voxel_size_um = np.asarray(voxel_size_um, dtype=float)
+    empty_cols = [
+        'node_id', 'z_um', 'y_um', 'x_um',
+        'degree', 'is_sprout_tip', 'is_junction',
+        'dist_nearest_junction_um', 'dist_nearest_endpoint_um',
+        'num_junction_neighbors', 'num_endpoint_neighbors',
+    ]
+    nodes = list(graph.nodes())
+    if not nodes:
+        return pd.DataFrame(columns=empty_cols)
+
+    positions_px = np.array([graph.nodes[n]['pts'] for n in nodes], dtype=float)
+    positions_um = positions_px * voxel_size_um[None, :]
+
+    degrees = np.array([graph.degree[n] for n in nodes])
+    is_sprout_tip = np.array([bool(graph.nodes[n].get('sprout', False)) for n in nodes])
+    is_junction = ~is_sprout_tip
+
+    n_nodes = len(nodes)
+    dist_nearest_junction = np.full(n_nodes, np.nan)
+    dist_nearest_endpoint = np.full(n_nodes, np.nan)
+    num_junction_neighbors = np.zeros(n_nodes, dtype=int)
+    num_endpoint_neighbors = np.zeros(n_nodes, dtype=int)
+
+    junction_idx = np.where(is_junction)[0]
+    endpoint_idx = np.where(is_sprout_tip)[0]
+
+    if n_nodes >= 2:
+        dist_matrix = cdist(positions_um, positions_um)
+
+        if len(junction_idx) > 0 and len(endpoint_idx) > 0:
+            jj = dist_matrix[np.ix_(junction_idx, junction_idx)]
+            np.fill_diagonal(jj, np.inf)
+            if jj.shape[1] > 1:
+                dist_nearest_junction[junction_idx] = np.min(jj, axis=1)
+                num_junction_neighbors[junction_idx] = np.sum(jj <= distance_threshold_um, axis=1)
+
+            je = dist_matrix[np.ix_(junction_idx, endpoint_idx)]
+            dist_nearest_endpoint[junction_idx] = np.min(je, axis=1)
+            num_endpoint_neighbors[junction_idx] = np.sum(je <= distance_threshold_um, axis=1)
+
+            ej = dist_matrix[np.ix_(endpoint_idx, junction_idx)]
+            dist_nearest_junction[endpoint_idx] = np.min(ej, axis=1)
+            num_junction_neighbors[endpoint_idx] = np.sum(ej <= distance_threshold_um, axis=1)
+
+            ee = dist_matrix[np.ix_(endpoint_idx, endpoint_idx)]
+            np.fill_diagonal(ee, np.inf)
+            if ee.shape[1] > 1:
+                dist_nearest_endpoint[endpoint_idx] = np.min(ee, axis=1)
+                num_endpoint_neighbors[endpoint_idx] = np.sum(ee <= distance_threshold_um, axis=1)
+
+        elif len(junction_idx) > 1:
+            jj = dist_matrix[np.ix_(junction_idx, junction_idx)]
+            np.fill_diagonal(jj, np.inf)
+            dist_nearest_junction[junction_idx] = np.min(jj, axis=1)
+            num_junction_neighbors[junction_idx] = np.sum(jj <= distance_threshold_um, axis=1)
+
+        elif len(endpoint_idx) > 1:
+            ee = dist_matrix[np.ix_(endpoint_idx, endpoint_idx)]
+            np.fill_diagonal(ee, np.inf)
+            dist_nearest_endpoint[endpoint_idx] = np.min(ee, axis=1)
+            num_endpoint_neighbors[endpoint_idx] = np.sum(ee <= distance_threshold_um, axis=1)
+
+    return pd.DataFrame({
+        'node_id': nodes,
+        'z_um': positions_um[:, 0],
+        'y_um': positions_um[:, 1],
+        'x_um': positions_um[:, 2],
+        'degree': degrees,
+        'is_sprout_tip': is_sprout_tip,
+        'is_junction': is_junction,
+        'dist_nearest_junction_um': dist_nearest_junction,
+        'dist_nearest_endpoint_um': dist_nearest_endpoint,
+        'num_junction_neighbors': num_junction_neighbors,
+        'num_endpoint_neighbors': num_endpoint_neighbors,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Comprehensive morphological parameters (all legacy + current metrics)
+# ---------------------------------------------------------------------------
+
+def compute_all_morphological_params(global_metrics, branch_metrics_df, junction_metrics_df):
+    """Build single-row DataFrame with all morphological parameters.
+
+    Includes everything in the simplified CSV plus full disaggregated
+    statistics: mean/std/median × branch/sprout/combined for vessel metrics,
+    and mean/std/median × junction/sprout_tip/combined for junction metrics.
+    """
+    params = dict(global_metrics)
+
+    # ── Per-branch disaggregated stats ────────────────────────────────────
+    if branch_metrics_df is not None and not branch_metrics_df.empty:
+        is_sprout = branch_metrics_df['is_sprout'].values
+
+        vessel_agg_columns = {
+            'volume_um3': 'branch_volume_um3',
+            'length_um': 'path_length_um',
+            'endpoint_distance_um': 'endpoint_distance_um',
+            'tortuosity': 'tortuosity',
+            'mean_cs_area_um2': 'mean_cs_area_um2',
+            'median_cs_area_um2': 'median_cs_area_um2',
+            'std_cs_area_um2': 'std_cs_area_um2',
+            'mean_width_um': 'mean_width_um',
+            'median_width_um': 'median_width_um',
+            'orientation_deg': 'orientation_to_device_axis_deg',
+        }
+
+        for param_name, col_name in vessel_agg_columns.items():
+            if col_name not in branch_metrics_df.columns:
+                continue
+            values = branch_metrics_df[col_name].to_numpy(dtype=float)
+            branch_vals = values[~is_sprout]
+            sprout_vals = values[is_sprout]
+
+            for agg, fn in [('mean', np.nanmean), ('std', np.nanstd), ('median', np.nanmedian)]:
+                params[f'{agg}_branch_{param_name}'] = float(fn(branch_vals)) if len(branch_vals) > 0 else np.nan
+                params[f'{agg}_sprout_{param_name}'] = float(fn(sprout_vals)) if len(sprout_vals) > 0 else np.nan
+                params[f'{agg}_sprout_and_branch_{param_name}'] = float(fn(values)) if len(values) > 0 else np.nan
+
+    # ── Per-junction disaggregated stats ──────────────────────────────────
+    if junction_metrics_df is not None and not junction_metrics_df.empty:
+        is_junction = junction_metrics_df['is_junction'].values
+        is_sprout_tip = junction_metrics_df['is_sprout_tip'].values
+
+        junction_agg_columns = [
+            'degree',
+            'dist_nearest_junction_um',
+            'dist_nearest_endpoint_um',
+            'num_junction_neighbors',
+            'num_endpoint_neighbors',
+        ]
+
+        for col_name in junction_agg_columns:
+            if col_name not in junction_metrics_df.columns:
+                continue
+            values = junction_metrics_df[col_name].to_numpy(dtype=float)
+            junc_vals = values[is_junction]
+            tip_vals = values[is_sprout_tip]
+
+            for agg, fn in [('mean', np.nanmean), ('std', np.nanstd), ('median', np.nanmedian)]:
+                params[f'{agg}_junction_{col_name}'] = float(fn(junc_vals)) if len(junc_vals) > 0 else np.nan
+                params[f'{agg}_sprout_tip_{col_name}'] = float(fn(tip_vals)) if len(tip_vals) > 0 else np.nan
+                params[f'{agg}_all_nodes_{col_name}'] = float(fn(values)) if len(values) > 0 else np.nan
+
+    return pd.DataFrame([params])
 
 
 # ---------------------------------------------------------------------------
@@ -1005,12 +1167,32 @@ def clean_and_analyse(
     global_metrics['sprouts_per_chip_volume_um_inverse3'] = safe_divide(sprouts_count, convex_hull_volume_um3)
     global_metrics['junctions_per_chip_volume_um_inverse3'] = safe_divide(branchpoints_count, convex_hull_volume_um3)
 
+    # ---- raw counts (for comprehensive output) ----
+    global_metrics['total_number_of_sprouts'] = int(sprouts_count)
+    global_metrics['total_number_of_branches'] = int(clean_graph.number_of_edges() - sprouts_count)
+    global_metrics['total_number_of_junctions'] = int(branchpoints_count)
+    global_metrics['total_number_of_edges'] = int(clean_graph.number_of_edges())
+    global_metrics['total_number_of_nodes'] = int(clean_graph.number_of_nodes())
+
+    # ---- junction metrics ----
+    junction_metrics_df = compute_junction_metrics_df(
+        clean_graph,
+        voxel_size_um=voxel_size_um,
+        distance_threshold_um=500.0,
+    )
+
+    # ---- comprehensive all-params DataFrame ----
+    all_morphological_params_df = compute_all_morphological_params(
+        global_metrics, branch_metrics_df, junction_metrics_df,
+    )
 
     global_metrics_df = pd.DataFrame([global_metrics])
     return {
         'global_metrics': global_metrics,
         'global_metrics_df': global_metrics_df,
         'branch_metrics_df': branch_metrics_df,
+        'junction_metrics_df': junction_metrics_df,
+        'all_morphological_params_df': all_morphological_params_df,
         'voxel_size_um': voxel_size_um,
         'chunk_size': chunk_size,
         'clean_segmentation': clean_segmentation,

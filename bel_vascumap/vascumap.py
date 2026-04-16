@@ -1,13 +1,9 @@
 from typing import Literal, Dict, List
-import time
 import numpy as np
 import pandas as pd
-import napari
 import math
 from pathlib import Path
-from liffile import LifFile
-from gui_device_segmentation import DeviceSegmentationApp
-import torch
+from device_segmentation import DeviceSegmentationApp
 from warnings import filterwarnings
 
 # Relative imports
@@ -24,7 +20,7 @@ class VascuMap:
         self,
         pix2pix_model_path: str = r"C:\Users\taylorhearn\git_repos\vascumap\luca_models\epoch=117-val_g_psnr=20.47-val_g_ssim=0.62.ckpt",
         unet_model_path: str = r"C:\Users\taylorhearn\git_repos\vascumap\luca_models\best_full.pth",
-        use_device_segmentation_app: bool = True,
+        curated_outputs: dict | None = None,
         image_source_path: str | None = None,
         image_index: int = 0,
         device_width_um: float = 35.0,
@@ -37,27 +33,31 @@ class VascuMap:
     ) -> None:
         """Initialize the VascuMap workflow container.
 
-        Optionally launches the napari-based device segmentation UI and stores
-        the resulting cropped stack plus metadata when the viewer is closed.
+        There are two modes of operation:
+
+        1. **Curated** — pass ``curated_outputs`` (a dict produced by
+           :class:`CurationApp`) to skip device segmentation entirely.
+        2. **Headless automatic** — pass ``image_source_path`` with a
+           ``.tif/.tiff/.lif`` file to run device segmentation automatically.
+
+        For interactive GUI curation, use :class:`gui_region_detection.CurationApp`
+        to curate images first, then feed the results here via
+        ``curated_outputs``.
 
         Args:
-            use_device_segmentation_app: If ``True``, start
-                :class:`DeviceSegmentationApp` and collect outputs. If ``False``,
-                initialization for the non-GUI path is not yet implemented.
+            curated_outputs: Dict from ``CuratedJob._finalised_outputs`` —
+                when provided, all device-segmentation steps are skipped.
+            image_source_path: Path to the source image (headless mode).
             model_p2p: Pre-loaded Pix2Pix model. If ``None``, loaded from
                 ``pix2pix_model_path``.
             model_unet: Pre-loaded UNet segmentation model. If ``None``, loaded
                 from ``unet_model_path``.
-
-        Raises:
-            NotImplementedError: If ``use_device_segmentation_app`` is ``False``.
         """
         
         self.model_p2p = model_p2p if model_p2p is not None else Pix2Pix(model_path=pix2pix_model_path)
         self.model_unet = model_unet if model_unet is not None else load_segmentation_model(unet_model_path)
         self.unet_model_path = unet_model_path
         self.app = None
-        self.use_device_segmentation_app = bool(use_device_segmentation_app)
         self.cropped_stack = None
         self.device_width_um = None
         self.pixel_size_um = None
@@ -73,26 +73,24 @@ class VascuMap:
         self._pixels_to_remove = None
         self._exclusion_mask_xy_aligned = None
         self._resized_organoid_mask_pre_trim = None  # cached after model_inference
-        self._t_device_seg = 0.0
-        self._t_preprocess = 0.0
-        self._t_inference = 0.0
-        self._t_analysis = 0.0
-        self._t_total = 0.0
         self.image_source_path = image_source_path
         self.image_index = int(image_index) if image_index is not None else 0
         self.hough_line_length = int(hough_line_length)
         
-        if self.use_device_segmentation_app:
-            self.app = DeviceSegmentationApp(line_length=self.hough_line_length)
-            napari.run()
-            outputs = self.app.get_cropped_outputs()
-            self.cropped_stack, self.device_width_um, self.pixel_size_um, self.z_votes, self.image_name = outputs[:5]
-            if len(outputs) >= 7:
-                self.mask_central_region_enabled = bool(outputs[5])
-                self.cropped_organoid_mask_xy = outputs[6]
+        if curated_outputs is not None:
+            # Pre-curated path: populate fields directly from CurationApp output
+            self.cropped_stack = curated_outputs["cropped_stack"]
+            self.device_width_um = curated_outputs["device_width_um"]
+            self.pixel_size_um = curated_outputs["pixel_size_um"]
+            self.z_votes = curated_outputs["z_votes"]
+            self.image_name = curated_outputs["image_name"]
+            self.mask_central_region_enabled = bool(curated_outputs.get("mask_central_region_enabled", False))
+            self.cropped_organoid_mask_xy = curated_outputs.get("cropped_organoid_mask_xy")
+            self.image_source_path = curated_outputs.get("source_path", image_source_path)
+            self.image_index = int(curated_outputs.get("image_index", image_index))
         else:
             if image_source_path is None:
-                raise ValueError("When use_device_segmentation_app is False, image_source_path is required and must point to a .tif/.tiff/.lif file.")
+                raise ValueError("Either curated_outputs or image_source_path must be provided.")
 
             src = Path(image_source_path)
             if (not src.exists()) or src.suffix.lower() not in (".tif", ".tiff", ".lif"):
@@ -100,7 +98,6 @@ class VascuMap:
 
             self.app = DeviceSegmentationApp(enable_gui=False, line_length=self.hough_line_length)
             self.app.channel = int(brightfield_channel)
-            _t_dev_seg_start = time.time()
             outputs = self.app.run_automatic(
                 image_source=src,
                 image_index=int(image_index),
@@ -108,8 +105,6 @@ class VascuMap:
                 mask_central_region=mask_central_region,
                 failure_output_dir=Path(failure_output_dir) if failure_output_dir else None,
             )
-            self._t_device_seg = time.time() - _t_dev_seg_start
-            print(f"  ⏱  Device segmentation: {self._t_device_seg:.1f}s")
             self.cropped_stack, self.device_width_um, self.pixel_size_um, self.z_votes, self.image_name = outputs[:5]
             if len(outputs) >= 7:
                 self.mask_central_region_enabled = bool(outputs[5])
@@ -445,24 +440,15 @@ class VascuMap:
                     )
                     return
 
-        # ── Run pipeline stages ───────────────────────────────────────────
-        _t_pipeline_start = time.time()
-
-        # ── Stage 1: z-selection + isotropic resize ──────────────────────────────
-        _t0 = time.time()
+        # ── Stage 1: z-selection + isotropic resize ──────────────────────
         result = self.preprocess()
         if result is None and self.cropped_stack is None:
             print(f"  ⚠ Skipping {name_prefix}: no valid z-range / cropped stack.")
             return
-        self._t_preprocess = time.time() - _t0
-        print(f"  ⏱  Stage 1 (z-select/resize): {self._t_preprocess:.1f}s")
 
         # ── Stage 2: Translation + segmentation ──────────────────────────
-        _t0 = time.time()
         self.model_inference(device="cuda")
         self.postprocess()
-        self._t_inference = time.time() - _t0
-        print(f"  ⏱  Stage 2 (Pix2Pix + UNet): {self._t_inference:.1f}s")
 
         if self._z_start_final is None:
             print(f"  ⚠ Skipping {name_prefix}: postprocess found no strong vote planes.")
@@ -503,10 +489,7 @@ class VascuMap:
             print(f"  Trimmed {trim_start} top / {orig_z - trim_stop} bottom over-segmented z-slices")
 
         # ── Stage 3: Skeletonisation + analysis ──────────────────────────
-        _t0 = time.time()
         self.skeletonisation_and_analysis()
-        self._t_analysis = time.time() - _t0
-        print(f"  ⏱  Stage 3 (skeleton/graph/analysis): {self._t_analysis:.1f}s")
 
         # ── Skeleton overview plot ────────────────────────────────────────
         _app_debug = getattr(self.app, '_last_segment_debug', None) or {}
@@ -533,6 +516,19 @@ class VascuMap:
         metrics_df.insert(2, 'image_index', int(self.image_index))
         metrics_df.to_csv(str(out / f"{name_prefix}_analysis_metrics.csv"), index=False)
         print(f"  Metrics → {name_prefix}_analysis_metrics.csv")
+
+        # ── All morphological parameters CSV (always saved) ──────────────
+        all_params_df = ar.get('all_morphological_params_df', pd.DataFrame()).copy()
+        if all_params_df is not None and not all_params_df.empty:
+            all_params_df.insert(0, 'image_name', name_prefix)
+            all_params_df.insert(1, 'source_file', src.name if src else '')
+            all_params_df.insert(2, 'image_index', int(self.image_index))
+        else:
+            all_params_df = pd.DataFrame({'image_name': [name_prefix],
+                                          'source_file': [src.name if src else ''],
+                                          'image_index': [int(self.image_index)]})
+        all_params_df.to_csv(str(out / f"{name_prefix}_all_morphological_params.csv"), index=False)
+        print(f"  All params → {name_prefix}_all_morphological_params.csv")
 
         # ── Branch-level metrics CSV (always saved) ──────────────────────
         branch_df = ar.get('branch_metrics_df', pd.DataFrame()).copy()
@@ -597,8 +593,4 @@ class VascuMap:
 
             print(f"  Saved all interim outputs for napari visualisation")
 
-        self._t_total = time.time() - _t_pipeline_start
-        print(f"  ⏱  Total pipeline time: {self._t_total:.1f}s  "
-              f"(device seg {self._t_device_seg:.0f}s | z-crop {self._t_preprocess:.0f}s "
-              f"| inference {self._t_inference:.0f}s | analysis {self._t_analysis:.0f}s)")
         print(f"  ✓ Done: {name_prefix}")

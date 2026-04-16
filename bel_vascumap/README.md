@@ -23,7 +23,7 @@ The pipeline processes `.lif`, `.tif`, or `.tiff` microscopy stacks through five
 ```
 bel_vascumap/
 ├── vascumap.py                  # VascuMap class + CLI entry point
-├── gui_device_segmentation.py   # DeviceSegmentationApp (napari GUI + auto mode)
+├── device_segmentation.py       # DeviceSegmentationApp (napari GUI + auto mode)
 ├── models.py                    # Pix2Pix (Generator, Discriminator), segmentation loaders
 ├── skeletonisation.py           # Graph construction, pruning, and metric computation
 ├── utils.py                     # Array utilities (scale, resize_dask, cupy_chunk_processing)

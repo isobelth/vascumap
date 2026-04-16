@@ -349,13 +349,11 @@ class DeviceSegmentationApp:
         @magicgui(
             image_choice={"label": "Image", "choices": ["(load images)"], "widget_type": "ComboBox"},
             mask_central_region={"label": "Mask central region"},
-            see_interim_layers={"label": "See interim layers (debug)"},
             clear_layers={"label": "Clear viewer first"},
             call_button="Segment + View",
         )
         def segment_and_view(image_choice: str = "(load images)",
             mask_central_region: bool = False,
-            see_interim_layers: bool = False,
             clear_layers: bool = True,
         ):
             self._segment_and_view(
@@ -364,7 +362,6 @@ class DeviceSegmentationApp:
                 focus_n_sampling=10,
                 focus_patch=50,
                 mask_central_region=mask_central_region,
-                see_interim_layers=see_interim_layers,
                 clear_layers=clear_layers,
             )
 
@@ -449,7 +446,6 @@ class DeviceSegmentationApp:
             focus_n_sampling=10,
             focus_patch=50,
             mask_central_region=mask_central_region,
-            see_interim_layers=False,
             clear_layers=True,
         )
 
@@ -462,17 +458,20 @@ class DeviceSegmentationApp:
                 fail_dir = Path(failure_output_dir)
                 fail_dir.mkdir(parents=True, exist_ok=True)
                 name = getattr(self, "image_name", None) or f"img{image_index}"
-                try:
-                    self._save_failure_diagnostic(name, fail_dir)
-                except Exception as diag_exc:
-                    print(f"  [WARN] Could not save diagnostic PNG: {diag_exc}")
+                # Compute stack height in um
+                stack_height_um = "unknown"
+                if self._last_stack is not None and self._last_z_step_um is not None:
+                    stack_height_um = f"{self._last_stack.shape[0] * self._last_z_step_um:.1f}"
+                elif self._last_stack is not None:
+                    stack_height_um = f"{self._last_stack.shape[0]} slices (z step unknown)"
                 txt_path = fail_dir / f"{name}_FAILED.txt"
                 txt_path.write_text(
                     f"Image: {name}\n"
                     f"Source: {source}\n"
                     f"Image index: {image_index}\n"
                     f"Device width (um): {device_width_um}\n"
-                    f"Mask central region: {mask_central_region}\n\n"
+                    f"Mask central region: {mask_central_region}\n"
+                    f"Stack height (um): {stack_height_um}\n\n"
                     f"Error: {msg}\n",
                     encoding="utf-8",
                 )
@@ -559,376 +558,7 @@ class DeviceSegmentationApp:
         overlay_path = out_dir / f"{name_prefix}_overlay_geometry{hough_tag}_{int(run_suffix)}.tif"
         tifffile.imwrite(str(overlay_path), overlay)
 
-        if debug_flag := (self._last_segment_debug or {}).get("flag", False):
-            self._save_segmentation_diagnostic_plot(name_prefix, out_dir)
-
-        if self._last_organoid_debug is not None:
-            self._save_organoid_debug_plot(name_prefix, out_dir)
-
-        # Save Hough retry progression whenever Hough fallback was used
-        hough_attempts = (self._last_segment_debug or {}).get("hough_attempts")
-        if hough_attempts:
-            self._save_hough_attempts_plot(name_prefix, out_dir, hough_attempts)
-
         return overlay_path
-
-    def _save_segmentation_diagnostic_plot(self, name_prefix: str, out_dir: Path):
-        """Save a multi-panel diagnostic PNG whenever primary device detection
-        failed (either rescued by dilation or fell back to Hough)."""
-
-        debug = self._last_segment_debug
-        if debug is None:
-            return
-
-        base = self._last_image
-        if base is not None and base.ndim == 3:
-            base = np.mean(base, axis=-1)
-
-        rescued = debug.get("rescue_closed_mask") is not None
-        rescue_radius = debug.get("rescue_radius")
-
-        # Always-present panels
-        panels = [
-            ("In-focus plane", base, "gray"),
-            ("Sobel edge map", debug.get("sobel_operated"), "gray"),
-            ("Binary threshold", debug.get("binary"), "gray"),
-            ("Filtered labels (dilate input)", debug.get("labels_to_dilate"), "nipy_spectral"),
-            ("Post-dilation mask", debug.get("post_dilation_mask"), "gray"),
-            ("Device mask (primary)", debug.get("device_mask"), "gray"),
-        ]
-
-        if rescued:
-            panels += [
-                (f"Dilation rescue (disk {rescue_radius}) closed mask",
-                 debug.get("rescue_closed_mask"), "gray"),
-            ]
-        else:
-            panels += [
-                ("Hough edges input", debug.get("edges"), "gray"),
-                ("Hough reconstructed lines", debug.get("reconstructed"), "gray"),
-                ("Hough combined mask", debug.get("reconstructed_mask"), "gray"),
-            ]
-
-        # Filter out None panels
-        panels = [(t, img, cm) for t, img, cm in panels if img is not None]
-        n = len(panels)
-        if n == 0:
-            return
-
-        ncols = min(n, 3)
-        nrows = (n + ncols - 1) // ncols
-
-        fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 6 * nrows))
-        if nrows * ncols == 1:
-            axes = np.array([axes])
-        axes = np.atleast_2d(axes)
-
-        for idx, (title, img, cmap) in enumerate(panels):
-            r, c = divmod(idx, ncols)
-            ax = axes[r, c]
-            ax.imshow(np.asarray(img), cmap=cmap, aspect="equal")
-
-            # Draw final corners on the last panel
-            corners = debug.get("final_corners")
-            if corners is not None and idx == len(panels) - 1:
-                corners = np.asarray(corners)
-                closed_pts = np.vstack([corners, corners[0:1]])
-                ax.plot(closed_pts[:, 0], closed_pts[:, 1], "r-", linewidth=2, label="final rect")
-                ax.legend(fontsize=8)
-
-            ax.set_title(title, fontsize=11)
-            ax.axis("off")
-
-        # Hide unused subplots
-        for idx in range(n, nrows * ncols):
-            r, c = divmod(idx, ncols)
-            axes[r, c].axis("off")
-
-        method = f"dilation rescue (disk {rescue_radius})" if rescued else "Hough fallback"
-        fig.suptitle(f"Device segmentation diagnostic [{method}] — {name_prefix}", fontsize=14)
-        plt.tight_layout()
-        save_path = Path(out_dir) / f"{name_prefix}_segmentation_diagnostic.png"
-        fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  Segmentation diagnostic plot → {save_path.name}")
-
-    def _save_failure_diagnostic(self, name_prefix: str, out_dir: Path):
-        """Save a diagnostic figure when automatic device detection fails.
-
-        Shows the in-focus projection, organoid overlay, and device mask so
-        the user can see why corner detection failed.
-        """
-        debug = self._last_segment_debug
-        base = self._last_image
-        if base is None and debug is None:
-            return
-
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        if base is not None and base.ndim == 3:
-            base = np.mean(base, axis=-1)
-
-        organoid = debug.get("organoid_region") if debug else None
-        device_mask = debug.get("device_mask") if debug else None
-        post_dilation = debug.get("post_dilation_mask") if debug else None
-        final_corners = debug.get("final_corners") if debug else None
-
-        fig, axes = plt.subplots(1, 3, figsize=(21, 6))
-
-        # Panel 1: in-focus projection
-        if base is not None:
-            axes[0].imshow(base, cmap="gray", aspect="equal")
-        axes[0].set_title("In-focus projection", fontsize=12)
-        axes[0].axis("off")
-
-        # Panel 2: projection + organoid overlay
-        if base is not None:
-            axes[1].imshow(base, cmap="gray", aspect="equal")
-            if organoid is not None and np.any(organoid):
-                overlay = np.zeros((*base.shape[:2], 4), dtype=np.float32)
-                overlay[organoid.astype(bool), :] = [0, 1, 1, 0.45]
-                axes[1].imshow(overlay, aspect="equal")
-                axes[1].set_title("Organoid detection (cyan overlay)", fontsize=12)
-            else:
-                axes[1].set_title("No organoid detected", fontsize=12)
-        else:
-            axes[1].set_title("No image available (crashed before focus plane)", fontsize=10, color="red")
-        axes[1].axis("off")
-
-        # Panel 3: device mask + corners
-        if device_mask is not None:
-            axes[2].imshow(device_mask.astype(np.uint8), cmap="gray", aspect="equal")
-            if final_corners is not None:
-                corners = np.asarray(final_corners)
-                closed_pts = np.vstack([corners, corners[0:1]])
-                axes[2].plot(closed_pts[:, 0], closed_pts[:, 1], "r-", linewidth=2)
-            axes[2].set_title("Device mask (corners failed)", fontsize=12)
-        elif post_dilation is not None:
-            axes[2].imshow(post_dilation.astype(np.uint8), cmap="gray", aspect="equal")
-            axes[2].set_title("Post-dilation mask (no device found)", fontsize=12)
-        else:
-            axes[2].set_title("No device mask (segmentation crashed)", fontsize=10, color="red")
-            axes[2].axis("off")
-        axes[2].axis("off")
-
-        fig.suptitle(f"FAILED device detection — {name_prefix}", fontsize=14, color="red")
-        plt.tight_layout()
-        save_path = out_dir / f"{name_prefix}_FAILED_diagnostic.png"
-        fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  Failure diagnostic plot → {save_path}")
-
-    def _save_hough_attempts_plot(self, name_prefix: str, out_dir: Path, hough_attempts: list):
-        """Save a multi-panel PNG showing each Hough retry's diagnostics.
-
-        Rows:
-          1. Reconstructed Hough lines only
-          2. Combined mask (lines + edges) with oriented-rect corners
-          3. Device mask (largest enclosed region) with oriented-rect corners
-          4. Text panel with diagnostic numbers
-        """
-        n = len(hough_attempts)
-        ncols = min(n, 4)
-        nrows = 4
-
-        fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows))
-        axes = np.atleast_2d(axes)
-        if ncols == 1:
-            axes = axes.reshape(nrows, 1)
-
-        for col, attempt in enumerate(hough_attempts):
-            ll = attempt["line_length"]
-            lg = attempt["line_gap"]
-            lt = attempt.get("threshold", "?")
-            idx = attempt["attempt"]
-            recon = attempt["reconstructed"]
-            mask = attempt["reconstructed_mask"]
-            device_mask = attempt.get("device_mask")
-            corners = attempt.get("corners")
-            corners_touch = attempt.get("corners_touch_border", None)
-            mask_touches = attempt.get("mask_touches_border", None)
-            area_frac = attempt.get("device_area_frac", None)
-            n_segs = attempt.get("n_hough_segments", None)
-            n_regions = attempt.get("n_regions", None)
-
-            # --- Row 1: reconstructed Hough lines only ---
-            ax_top = axes[0, col]
-            ax_top.imshow(recon, cmap="gray", aspect="equal")
-            ax_top.set_title(
-                f"Attempt {idx}\nll={ll}, lg={lg}, thr={lt}"
-                + (f"\n{n_segs} segments" if n_segs is not None else ""),
-                fontsize=10,
-            )
-            ax_top.axis("off")
-
-            # --- Row 2: combined mask with corners ---
-            ax_mask = axes[1, col]
-            ax_mask.imshow(mask, cmap="gray", aspect="equal")
-            if corners is not None:
-                pts = np.asarray(corners)
-                closed_pts = np.vstack([pts, pts[0:1]])
-                color = "r" if corners_touch else "lime"
-                ax_mask.plot(closed_pts[:, 0], closed_pts[:, 1], color=color, linewidth=2)
-            status = "✓" if (corners is not None and not corners_touch) else "✗"
-            ax_mask.set_title(f"Combined mask {status}", fontsize=10)
-            ax_mask.axis("off")
-
-            # --- Row 3: device mask with corners ---
-            ax_dev = axes[2, col]
-            if device_mask is not None:
-                ax_dev.imshow(device_mask, cmap="gray", aspect="equal")
-                if corners is not None:
-                    pts = np.asarray(corners)
-                    closed_pts = np.vstack([pts, pts[0:1]])
-                    color = "r" if corners_touch else "lime"
-                    ax_dev.plot(closed_pts[:, 0], closed_pts[:, 1], color=color, linewidth=2)
-            else:
-                ax_dev.text(0.5, 0.5, "N/A", ha="center", va="center", fontsize=14, transform=ax_dev.transAxes)
-            dm_status = ""
-            if mask_touches is not None:
-                dm_status = " (mask touches border)" if mask_touches else " (interior)"
-            ax_dev.set_title(f"Device mask{dm_status}", fontsize=10)
-            ax_dev.axis("off")
-
-            # --- Row 4: text diagnostics ---
-            ax_txt = axes[3, col]
-            ax_txt.axis("off")
-            lines = []
-            lines.append(f"Hough threshold: {lt}")
-            if n_segs is not None:
-                lines.append(f"Hough segments: {n_segs}")
-            if n_regions is not None:
-                lines.append(f"Regions in inverted mask: {n_regions}")
-            if area_frac is not None:
-                lines.append(f"Device area: {area_frac:.1%} of image")
-            if mask_touches is not None:
-                lines.append(f"Mask touches border: {mask_touches}")
-            if corners_touch is not None:
-                lines.append(f"Corners touch border: {corners_touch}")
-            if corners is not None:
-                for ci, (cx, cy) in enumerate(np.asarray(corners)):
-                    lines.append(f"  corner {ci}: ({cx:.0f}, {cy:.0f})")
-            else:
-                lines.append("Corners: None")
-            ax_txt.text(
-                0.05, 0.95, "\n".join(lines),
-                transform=ax_txt.transAxes, fontsize=9,
-                verticalalignment="top", fontfamily="monospace",
-            )
-            ax_txt.set_title("Diagnostics", fontsize=10)
-
-        # Hide unused columns if fewer than ncols attempts
-        for col in range(n, ncols):
-            for row in range(nrows):
-                axes[row, col].axis("off")
-
-        fig.suptitle(f"Hough probabilistic line retries — {name_prefix}", fontsize=13)
-        plt.tight_layout()
-        save_path = Path(out_dir) / f"{name_prefix}_hough_retries.png"
-        fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  Hough retries plot → {save_path.name}")
-
-    def _save_organoid_debug_plot(self, name_prefix: str, out_dir: Path):
-        """Save a multi-panel diagnostic PNG showing all organoid segmentation
-        steps: pre/post clipping and the binary + chosen region at each attempt."""
-
-        dbg = self._last_organoid_debug
-        if dbg is None:
-            return
-
-        _step1_label = {
-            "yen_on_smoothed": "Step 1: Yen (smoothed, light)",
-            "yen_on_inverted": "Step 1: Yen (inverted, dark)",
-        }.get(dbg.get("step1_method"), "Step 1")
-
-        def _frac(key):
-            f = dbg.get(key)
-            return f"  ({f:.1%})" if f is not None else ""
-
-        _processed_label = (
-            "Gaussian only / no inversion (light mode, pre-clip)"
-            if dbg.get("mode") == "light"
-            else "Inverted + Gaussian (dark mode, pre-clip)"
-        )
-        panels = [
-            ("In-focus plane", dbg.get("in_focus_plane"), "gray"),
-            (_processed_label, dbg.get("processed"), "gray"),
-        ]
-        if dbg.get("clipped") is not None:
-            panels.append(("Clipped (post-clip)", dbg.get("clipped"), "gray"))
-
-        panels += [
-            (f"{_step1_label}{_frac('step1_area_frac')}\nbinary",
-             dbg.get("step1_binary"), "gray"),
-            (f"{_step1_label}{_frac('step1_area_frac')}\nbest region",
-             dbg.get("step1_region"), "gray"),
-        ]
-
-        if dbg.get("step2_triggered"):
-            _step2_method = dbg.get("step2_method", "")
-            _step2_label = {
-                "yen_on_inverted": "Step 2: Yen (inverted, dark fallback)",
-                "otsu_on_inverted": "Step 2: Otsu (inverted, Yen too large)",
-            }.get(_step2_method, f"Step 2: {_step2_method}")
-            panels += [
-                (f"{_step2_label}{_frac('step2_area_frac')}\nbinary",
-                 dbg.get("step2_binary"), "gray"),
-                (f"{_step2_label}{_frac('step2_area_frac')}\nbest region",
-                 dbg.get("step2_region"), "gray"),
-            ]
-
-        if dbg.get("step3_triggered"):
-            _step3_method = dbg.get("step3_method", "")
-            _step3_label = {
-                "otsu_on_inverted": "Step 3: Otsu (inverted, Yen too large)",
-            }.get(_step3_method, f"Step 3: {_step3_method}")
-            panels += [
-                (f"{_step3_label}{_frac('step3_area_frac')}\nbinary",
-                 dbg.get("step3_binary"), "gray"),
-                (f"{_step3_label}{_frac('step3_area_frac')}\nbest region",
-                 dbg.get("step3_region"), "gray"),
-            ]
-
-        panels.append(("Final organoid mask (pre-morphology)", dbg.get("final_region"), "gray"))
-
-        panels = [(t, img, cm) for t, img, cm in panels if img is not None]
-        n = len(panels)
-        if n == 0:
-            return
-
-        ncols = min(n, 4)
-        nrows = (n + ncols - 1) // ncols
-
-        fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows))
-        if nrows * ncols == 1:
-            axes = np.array([axes])
-        axes = np.atleast_2d(axes)
-
-        for idx, (title, img, cmap) in enumerate(panels):
-            r, c = divmod(idx, ncols)
-            axes[r, c].imshow(np.asarray(img), cmap=cmap, aspect="equal")
-            axes[r, c].set_title(title, fontsize=9)
-            axes[r, c].axis("off")
-
-        for idx in range(n, nrows * ncols):
-            r, c = divmod(idx, ncols)
-            axes[r, c].axis("off")
-
-        fig.suptitle(f"Organoid segmentation debug — {name_prefix}", fontsize=13)
-        plt.tight_layout()
-        save_path = Path(out_dir) / f"{name_prefix}_organoid_debug.png"
-        fig.savefig(str(save_path), dpi=120, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  Organoid debug plot → {save_path.name}")
-
-        # Save the try_all_threshold diagnostic (always generated for organoid segmentation).
-        try_all_img = dbg.get("try_all_threshold_img")
-        if try_all_img is not None:
-            ta_path = Path(out_dir) / f"{name_prefix}_organoid_try_all_threshold.png"
-            plt.imsave(str(ta_path), try_all_img)
-            print(f"  try_all_threshold plot → {ta_path.name}")
 
     # -------- Focus helpers (integrated; no separate class) --------
     def _to_gray(self, im):
@@ -1766,6 +1396,14 @@ class DeviceSegmentationApp:
             final_angle_rad = angle_rad
             final_centroid_xy = centroid_xy
 
+        # Fallback: if no device was found at all, use the entire image as the device
+        if final_corners is None:
+            h, w = in_focus_plane.shape[:2]
+            final_corners = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=float)
+            final_angle_rad = 0.0
+            final_centroid_xy = np.array([w / 2.0, h / 2.0])
+            print("  [Fallback] No device found — using entire image as device region")
+
         cropped_rotated = self._crop_rectified_from_corners(in_focus_plane, final_corners)
 
         if return_debug:
@@ -1894,7 +1532,6 @@ class DeviceSegmentationApp:
         focus_n_sampling: int,
         focus_patch: int,
         mask_central_region,
-        see_interim_layers: bool,
         clear_layers: bool,
     ):
         source_is_lif = bool(getattr(self, "_selected_lif", None) and self._selected_lif.exists())
@@ -2002,17 +1639,6 @@ class DeviceSegmentationApp:
 
 
         self._add_layer_if_nonzero(in_focus_plane, name="original", layer_type="image")
-
-        if see_interim_layers:
-            self._add_layer_if_nonzero(debug.get("sobel_operated"), name="sobel", layer_type="image")
-            self._add_layer_if_nonzero(debug.get("binary").astype(np.uint8), name="binary", layer_type="image")
-            self._add_layer_if_nonzero(debug.get("labels_to_dilate").astype(np.int32), name="labels_to_dilate", layer_type="labels")
-            final_layer = self._add_layer_if_nonzero(debug.get("post_dilation_mask").astype(np.uint8), name="post_dilation_mask", layer_type="labels")
-            if final_layer is not None:
-                final_layer.opacity = 0.4
-            device_layer = self._add_layer_if_nonzero(debug.get("device_mask").astype(np.uint8), name="device_mask", layer_type="labels")
-            if device_layer is not None:
-                device_layer.opacity = 0.4
 
         if mask_central_region and organoid_region is not None:
             organoid_layer = self._add_layer_if_nonzero(organoid_region.astype(np.uint8), name="organoid_region", layer_type="labels")
