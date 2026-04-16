@@ -5,9 +5,6 @@ import math
 from pathlib import Path
 from device_segmentation import DeviceSegmentationApp
 from warnings import filterwarnings
-
-# Relative imports
-
 from models import Pix2Pix, load_segmentation_model, predict_mask_ortho, process_vessel_mask
 from utils import scale, resize_dask
 from skeletonisation import clean_and_analyse, trim_segmentation, generate_skeleton_overview_plot, build_internal_pore_label_volumes, graph2image
@@ -45,7 +42,7 @@ class VascuMap:
         ``curated_outputs``.
 
         Args:
-            curated_outputs: Dict from ``CuratedJob._finalised_outputs`` —
+            curated_outputs: Dict from ``CuratedJob.finalised_outputs`` —
                 when provided, all device-segmentation steps are skipped.
             image_source_path: Path to the source image (headless mode).
             model_p2p: Pre-loaded Pix2Pix model. If ``None``, loaded from
@@ -66,13 +63,13 @@ class VascuMap:
         self.mask_central_region_enabled = False
         self.cropped_organoid_mask_xy = None
         self.initial_z_range = None
-        self._pre_z_start_global = None
-        self._pre_z_um = None
-        self._z_start_final = None
-        self._z_stop_final = None
-        self._pixels_to_remove = None
-        self._exclusion_mask_xy_aligned = None
-        self._resized_organoid_mask_pre_trim = None  # cached after model_inference
+        self.pre_z_start_global = None
+        self.pre_z_um = None
+        self.z_start_final = None
+        self.z_stop_final = None
+        self.pixels_to_remove = None
+        self.exclusion_mask_xy_aligned = None
+        self.resized_organoid_mask_pre_trim = None
         self.image_source_path = image_source_path
         self.image_index = int(image_index) if image_index is not None else 0
         self.hough_line_length = int(hough_line_length)
@@ -110,8 +107,7 @@ class VascuMap:
                 self.mask_central_region_enabled = bool(outputs[5])
                 self.cropped_organoid_mask_xy = outputs[6]
        
-    def preprocess(self, cropped_stack: np.ndarray = None, pixel_size_um: Dict = None, z_votes: List = None, min_span_um: float = 160.0
-    ) -> np.array:
+    def preprocess(self, cropped_stack: np.ndarray = None, pixel_size_um: Dict = None, z_votes: List = None, min_span_um: float = 160.0) -> np.array:
         """Select a focus-informed z-range and crop the stack along z.
 
         The function builds a normalized z-vote map, finds the best contiguous
@@ -210,21 +206,17 @@ class VascuMap:
 
         final_length = z_end - z_start + 1
 
-        self.initial_z_range, self.cropped_stack = (
-            {int(i): int(votes.get(i, 0)) for i in range(int(z_start), int(z_end) + 1)},
-            cropped_stack[int(z_start):int(z_end) + 1, :, :]
-        )
-        self._pre_z_start_global = int(z_start)
-        self._pre_z_um = float(pixel_size_um["z_um"])
+        self.initial_z_range = {int(i): int(votes.get(i, 0)) for i in range(int(z_start), int(z_end) + 1)}
+        self.cropped_stack = cropped_stack[int(z_start):int(z_end) + 1, :, :]
+        self.pre_z_start_global = int(z_start)
+        self.pre_z_um = float(pixel_size_um["z_um"])
         self.cropped_stack = resize_dask(self.cropped_stack, [pixel_size_um["z_um"] / 5.0, pixel_size_um["y_um"] / 2.0, pixel_size_um["x_um"] / 2.0])
         
         print(f"First cropping to z: {self.initial_z_range}")
         print(f"Stack width {(z_step * final_length)}")
 
-    def model_inference(self, cropped_stack: np.ndarray = None, device: Literal['cuda', 'cpu'] = 'cuda', 
-    ) -> None:
-        """
-        """
+    def model_inference(self, cropped_stack: np.ndarray = None, device: Literal['cuda', 'cpu'] = 'cuda') -> None:
+        """Run Pix2Pix vessel translation and UNet segmentation on the cropped stack."""
         
         if not cropped_stack:
             cropped_stack = self.cropped_stack
@@ -250,8 +242,7 @@ class VascuMap:
                         resized_mask = np.pad(resized_mask, ((0, 0), (0, pad_w)), mode="constant", constant_values=False)
                     resized_mask = resized_mask[:target_h, :target_w]
 
-                    # A1: cache full-resolution mask for reuse in skeletonisation_and_analysis
-                    self._resized_organoid_mask_pre_trim = resized_mask
+                    self.resized_organoid_mask_pre_trim = resized_mask
 
                     if np.any(resized_mask):
                         # A2: vectorised fill — compute per-slice means in one shot instead of a Python loop
@@ -271,11 +262,9 @@ class VascuMap:
         self.vessel_mask_iso = process_vessel_mask(self.vessel_proba_iso, True) 
 
         
-    def postprocess(self, 
-    ) -> None:
-        """
-        """
-        if self.initial_z_range is None or self._pre_z_start_global is None or self._pre_z_um is None:
+    def postprocess(self) -> None:
+        """Map the best contiguous z-vote span to isotropic coordinates and crop all volumes."""
+        if self.initial_z_range is None or self.pre_z_start_global is None or self.pre_z_um is None:
             return
 
         final_z_um = 2.0
@@ -312,11 +301,11 @@ class VascuMap:
         global_z1 = zs[best_end]
         print(f"strong contiguous vote planes {global_z0}-{global_z1}")
 
-        rel_z0 = global_z0 - int(self._pre_z_start_global)
-        rel_z1 = global_z1 - int(self._pre_z_start_global)
+        rel_z0 = global_z0 - int(self.pre_z_start_global)
+        rel_z1 = global_z1 - int(self.pre_z_start_global)
 
-        um_start = float(rel_z0) * float(self._pre_z_um)
-        um_stop = float(rel_z1 + 1) * float(self._pre_z_um)
+        um_start = float(rel_z0) * float(self.pre_z_um)
+        um_stop = float(rel_z1 + 1) * float(self.pre_z_um)
 
         z_start_final = int(np.floor(um_start / final_z_um))
         z_stop_final = int(np.ceil(um_stop / final_z_um))
@@ -329,22 +318,16 @@ class VascuMap:
         current_x_pixels = self.vessel_proba_iso.shape[1]
         current_y_pixels = self.vessel_proba_iso.shape[2]
         pixels_to_remove = int(self.device_width_um)  # harsher cropping
-        self._z_start_final = z_start_final
-        self._z_stop_final = z_stop_final
-        self._pixels_to_remove = pixels_to_remove
+        self.z_start_final = z_start_final
+        self.z_stop_final = z_stop_final
+        self.pixels_to_remove = pixels_to_remove
         self.vessel_pred_iso = self.vessel_pred_iso[z_start_final:z_stop_final, pixels_to_remove:current_x_pixels-pixels_to_remove, pixels_to_remove:current_y_pixels-pixels_to_remove]
         self.vessel_proba_iso = self.vessel_proba_iso[z_start_final:z_stop_final, pixels_to_remove:current_x_pixels-pixels_to_remove, pixels_to_remove:current_y_pixels-pixels_to_remove]
         self.vessel_mask_iso = self.vessel_mask_iso[z_start_final:z_stop_final, pixels_to_remove:current_x_pixels-pixels_to_remove, pixels_to_remove:current_y_pixels-pixels_to_remove]
         
         
-    def skeletonisation_and_analysis(
-        self,
-        voxel_size_um=(2.0, 2.0, 2.0),
-        junction_distance_mode='skeleton',
-    ) -> None:
-        """
-        Run skeletonisation and vascular-network analysis on the final mask.
-        """
+    def skeletonisation_and_analysis(self, voxel_size_um=(2.0, 2.0, 2.0), junction_distance_mode='skeleton') -> None:
+        """Run skeletonisation and vascular-network analysis on the final vessel mask."""
         if self.vessel_mask_iso is None:
             print("No vessel_mask_iso available – skipping analysis.")
             return
@@ -355,11 +338,10 @@ class VascuMap:
         if self.mask_central_region_enabled and self.cropped_organoid_mask_xy is not None:
             target_h = int(self.vessel_mask_iso.shape[1])
             target_w = int(self.vessel_mask_iso.shape[2])
-            ptr = self._pixels_to_remove if self._pixels_to_remove is not None else int(self.device_width_um)
+            ptr = self.pixels_to_remove if self.pixels_to_remove is not None else int(self.device_width_um)
 
-            if self._resized_organoid_mask_pre_trim is not None:
-                # A1: reuse the mask already resized in model_inference — just apply the XY trim
-                resized = self._resized_organoid_mask_pre_trim[ptr:ptr + target_h, ptr:ptr + target_w]
+            if self.resized_organoid_mask_pre_trim is not None:
+                resized = self.resized_organoid_mask_pre_trim[ptr:ptr + target_h, ptr:ptr + target_w]
             else:
                 # Fallback: compute from scratch (e.g. if model_inference was skipped)
                 mask_xy = np.asarray(self.cropped_organoid_mask_xy, dtype=np.float32)
@@ -394,7 +376,7 @@ class VascuMap:
         if exclusion_mask_xy is not None:
             self.vessel_mask_iso[:, exclusion_mask_xy] = 0
 
-        self._exclusion_mask_xy_aligned = exclusion_mask_xy
+        self.exclusion_mask_xy_aligned = exclusion_mask_xy
         self.analysis_results = clean_and_analyse(
             self.vessel_mask_iso,
             voxel_size_um=voxel_size_um,
@@ -403,11 +385,7 @@ class VascuMap:
         )
         print(self.analysis_results['global_metrics_df'].to_string(index=False))
         
-    def pipeline(
-        self,
-        output_dir: str | Path | None = None,
-        save_all_interim: bool = False,
-    ) -> None:
+    def pipeline(self, output_dir: str | Path | None = None, save_all_interim: bool = False) -> None:
         """Run the full VascuMap pipeline and save outputs.
 
         Args:
@@ -429,13 +407,13 @@ class VascuMap:
 
         # ── Organoid size guard ───────────────────────────────────────────
         if self.mask_central_region_enabled and self.cropped_organoid_mask_xy is not None:
-            _org_mask = np.asarray(self.cropped_organoid_mask_xy, dtype=bool)
-            if _org_mask.size > 0:
-                _org_fraction = np.count_nonzero(_org_mask) / _org_mask.size
-                if _org_fraction > 0.40:
+            organoid_mask = np.asarray(self.cropped_organoid_mask_xy, dtype=bool)
+            if organoid_mask.size > 0:
+                organoid_fraction = np.count_nonzero(organoid_mask) / organoid_mask.size
+                if organoid_fraction > 0.40:
                     print(
                         f"  ⚠ Skipping {name_prefix}: organoid covers "
-                        f"{_org_fraction:.1%} of the image (>40% threshold). "
+                        f"{organoid_fraction:.1%} of the image (>40% threshold). "
                         f"Device segmentation outputs saved."
                     )
                     return
@@ -450,7 +428,7 @@ class VascuMap:
         self.model_inference(device="cuda")
         self.postprocess()
 
-        if self._z_start_final is None:
+        if self.z_start_final is None:
             print(f"  ⚠ Skipping {name_prefix}: postprocess found no strong vote planes.")
             return
 
@@ -479,20 +457,38 @@ class VascuMap:
             debug_txt.write_text("\n".join(msg_lines), encoding="utf-8")
             print(f"  ⚠ Skipping {name_prefix}: all z-slices trimmed (too much vasculature). "
                   f"Debug info → {debug_txt.name}")
+
+            # Save interim outputs even on trim failure so the user can
+            # inspect the over-segmented result in napari.
+            if save_all_interim:
+                z0, z1 = self.z_start_final, self.z_stop_final
+                ptr = self.pixels_to_remove
+                if z0 is not None and z1 is not None and ptr is not None:
+                    cropped_stack_iso = resize_dask(self.cropped_stack, [2.5, 1, 1])
+                    H, W = cropped_stack_iso.shape[1], cropped_stack_iso.shape[2]
+                    cropped_stack_aligned = cropped_stack_iso[z0:z1, ptr:H - ptr, ptr:W - ptr]
+                    np.save(str(out / f"{name_prefix}_cropped_stack_aligned.npy"),
+                            cropped_stack_aligned)
+                np.save(str(out / f"{name_prefix}_vessel_translation_aligned.npy"),
+                        self.vessel_pred_iso)
+                np.save(str(out / f"{name_prefix}_vessel_mask.npy"),
+                        self.vessel_mask_iso)
+                print(f"  Saved interim outputs (pre-trim) for napari debugging")
+
             return
         if trim_start > 0 or trim_stop < orig_z:
-            old_z0 = self._z_start_final
+            old_z0 = self.z_start_final
             self.vessel_mask_iso = trimmed
             self.vessel_pred_iso = self.vessel_pred_iso[trim_start:trim_stop]
-            self._z_start_final = old_z0 + trim_start
-            self._z_stop_final = old_z0 + trim_stop
+            self.z_start_final = old_z0 + trim_start
+            self.z_stop_final = old_z0 + trim_stop
             print(f"  Trimmed {trim_start} top / {orig_z - trim_stop} bottom over-segmented z-slices")
 
         # ── Stage 3: Skeletonisation + analysis ──────────────────────────
         self.skeletonisation_and_analysis()
 
         # ── Skeleton overview plot ────────────────────────────────────────
-        _app_debug = getattr(self.app, '_last_segment_debug', None) or {}
+        app_debug = getattr(self.app, 'last_segment_debug', None) or {}
         generate_skeleton_overview_plot(
             self.vessel_mask_iso,
             self.analysis_results,
@@ -500,9 +496,9 @@ class VascuMap:
             save_path=str(out / f"{name_prefix}_skeleton_overview.png"),
             brightfield_stack=self.cropped_stack,
             organoid_mask_xy=self.cropped_organoid_mask_xy,
-            brightfield_full=getattr(self.app, '_last_image', None),
-            device_corners_xy=_app_debug.get('final_corners'),
-            organoid_mask_full_xy=getattr(self.app, '_last_organoid_region', None),
+            brightfield_full=getattr(self.app, 'last_image', None),
+            device_corners_xy=app_debug.get('final_corners'),
+            organoid_mask_full_xy=getattr(self.app, 'last_organoid_region', None),
         )
         print(f"  Skeleton overview → {name_prefix}_skeleton_overview.png")
 
@@ -551,7 +547,7 @@ class VascuMap:
         if save_all_interim:
 
             # ── Aligned cropped stack (2 µm iso) ─────────────────────────
-            z0, z1, ptr = self._z_start_final, self._z_stop_final, self._pixels_to_remove
+            z0, z1, ptr = self.z_start_final, self.z_stop_final, self.pixels_to_remove
             if z0 is not None and z1 is not None and ptr is not None:
                 cropped_stack_iso = resize_dask(self.cropped_stack, [2.5, 1, 1])
                 H, W = cropped_stack_iso.shape[1], cropped_stack_iso.shape[2]
@@ -563,9 +559,9 @@ class VascuMap:
             np.save(str(out / f"{name_prefix}_clean_segmentation.npy"), ar["clean_segmentation"])
             np.save(str(out / f"{name_prefix}_skeleton.npy"), ar["skeleton_from_graph"])
 
-            if self._exclusion_mask_xy_aligned is not None:
+            if self.exclusion_mask_xy_aligned is not None:
                 np.save(str(out / f"{name_prefix}_organoid_mask.npy"),
-                        self._exclusion_mask_xy_aligned.astype(np.uint8))
+                        self.exclusion_mask_xy_aligned.astype(np.uint8))
 
             seg = ar["clean_segmentation"].astype(bool)
             holes, hole_labels, hole_dist = build_internal_pore_label_volumes(

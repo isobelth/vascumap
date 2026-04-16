@@ -186,14 +186,14 @@ class CurationApp:
 
         # Check success — if the engine couldn't find corners, cropped_xyz won't exist yet
         # but we can check inner corners from the debug dict
-        debug = getattr(eng, '_last_segment_debug', None) or {}
+        debug = getattr(eng, 'last_segment_debug', None) or {}
         final_corners = debug.get('final_corners', None)
         if final_corners is None:
             msg = str(getattr(eng.images_output, "value", "Segmentation failed"))
             raise RuntimeError(msg)
 
         # Extract focus plane
-        focus_plane = eng._last_image
+        focus_plane = eng.last_image
         if focus_plane is not None:
             focus_plane = np.asarray(focus_plane, dtype=np.float32)
             if focus_plane.ndim == 3:
@@ -202,12 +202,12 @@ class CurationApp:
         # Extract organoid mask
         organoid_mask = None
         if job.organoid_mode != "off":
-            org_region = eng._last_organoid_region
+            org_region = eng.last_organoid_region
             if org_region is not None:
                 organoid_mask = np.asarray(org_region, dtype=bool)
 
         # Store voxel sizes
-        z_um = eng._last_z_step_um
+        z_um = eng.last_z_step_um
         y_um = eng._last_y_step_um
         x_um = eng._last_x_step_um
         xy_um = eng._last_xy_step_um
@@ -674,7 +674,7 @@ class CurationApp:
             z_votes = {int(i): int(c) for i, c in enumerate(vote_counts)}
 
         # Store finalised outputs on the job for downstream use
-        job._finalised_outputs = {
+        job.finalised_outputs = {
             "cropped_stack": cropped_stack,
             "device_width_um": job.device_width_um,
             "pixel_size_um": job.pixel_size_um,
@@ -690,34 +690,80 @@ class CurationApp:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self) -> list[CuratedJob]:
-        """Launch curation GUI, block until done, return curated job list.
+    def open(self) -> "CurationApp":
+        """Auto-detect all images, build napari viewer, and return immediately.
+
+        The viewer stays open via Jupyter's Qt event-loop integration.
+        Navigate with keyboard shortcuts (n = next, b = back) or the panel
+        buttons.  When finished curating, call ``finalise()`` from the next
+        notebook cell.
+
+        Returns
+        -------
+        CurationApp
+            Self, for chaining.
+        """
+        if not self.jobs:
+            print("No jobs to curate.")
+            return self
+
+        # Phase 1: auto-detect device ROI + organoid mask for every image
+        self._auto_detect_all()
+
+        # Phase 2: build viewer, add key bindings, show first image
+        self._build_viewer()
+        self._add_key_bindings()
+        self._show_job(0)
+
+        n_ok = sum(1 for j in self.jobs if j.status == "curated")
+        n_fail = sum(1 for j in self.jobs if j.status == "failed")
+        print(f"\n{len(self.jobs)} images loaded ({n_ok} OK, {n_fail} failed).")
+        print("Shortcuts: n = next, b = back, a = accept, s = skip")
+        print("When done curating, run  app.finalise()  in the next cell.")
+        return self
+
+    def finalise(self) -> list[CuratedJob]:
+        """Save current edits, finalise curated jobs, and return the job list.
+
+        Call this from a new notebook cell after you have finished curating
+        in the napari viewer.
 
         Returns
         -------
         list[CuratedJob]
-            All jobs with status "curated" have ``_finalised_outputs`` dict
-            ready for VascuMap consumption. Jobs with status "skip" are included
-            but have no outputs.
+            All jobs with status "curated" have ``finalised_outputs`` dict
+            ready for VascuMap consumption.
         """
-        if not self.jobs:
-            print("No jobs to curate.")
-            return self.jobs
-
-        # Phase A-1: auto-detect all
-        self._auto_detect_all()
-
-        # Phase A-2: build viewer and show first job
-        self._build_viewer()
-        self._show_job(0)
-
-        # Block until viewer is closed
-        napari.run()
-
-        # Phase A-3: finalise curated jobs (reload stacks, crop, compute votes)
+        self._save_current_state()
         self._finalise_jobs()
-
         return self.jobs
+
+    def run(self) -> list[CuratedJob]:
+        """Convenience: open viewer, block until closed, finalise, return jobs.
+
+        Prefer ``open()`` + ``finalise()`` in notebooks.
+        """
+        self.open()
+        napari.run(force=True)
+        return self.finalise()
+
+    def _add_key_bindings(self):
+        """Register keyboard shortcuts on the napari viewer."""
+        @self.viewer.bind_key("n")
+        def _key_next(viewer):
+            self._go_next()
+
+        @self.viewer.bind_key("b")
+        def _key_prev(viewer):
+            self._go_prev()
+
+        @self.viewer.bind_key("a")
+        def _key_accept(viewer):
+            self._accept_current()
+
+        @self.viewer.bind_key("s")
+        def _key_skip(viewer):
+            self._mark_skip()
 
     # ------------------------------------------------------------------
     # Manifest I/O (optional persistence)

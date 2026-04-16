@@ -304,9 +304,9 @@ class DeviceSegmentationApp:
         self._active_device_width_um = None
         self._syncing_outer_geometry = False
         self._cropped_layer = None
-        self._last_image = None
+        self.last_image = None
         self._hough_fallback_used = False
-        self._last_segment_debug = None
+        self.last_segment_debug = None
 
         self._last_stack = None
         self._last_focus_downsample = 1
@@ -314,7 +314,7 @@ class DeviceSegmentationApp:
         self._last_focus_patch = 50
         self._last_focus_zmap_full = None
 
-        self._last_z_step_um = None
+        self.last_z_step_um = None
         self._last_y_step_um = None
         self._last_x_step_um = None
         self._last_xy_step_um = None
@@ -326,7 +326,7 @@ class DeviceSegmentationApp:
         self.cropped_xyz = None
         self.image_name = None
         self._mask_central_region_enabled = False
-        self._last_organoid_region = None
+        self.last_organoid_region = None
         self._last_organoid_debug = None
         self._cropped_organoid_mask_xy_raw = None
 
@@ -412,7 +412,7 @@ class DeviceSegmentationApp:
         self.segment_and_view.image_choice.value = "(load images)"
 
     def _set_last_voxel_steps(self, z_um, y_um, x_um):
-        self._last_z_step_um = z_um
+        self.last_z_step_um = z_um
         self._last_y_step_um = y_um
         self._last_x_step_um = x_um
         self._last_xy_step_um = np.nanmean([v for v in [x_um, y_um] if v is not None]) if (x_um is not None or y_um is not None) else None
@@ -460,8 +460,8 @@ class DeviceSegmentationApp:
                 name = getattr(self, "image_name", None) or f"img{image_index}"
                 # Compute stack height in um
                 stack_height_um = "unknown"
-                if self._last_stack is not None and self._last_z_step_um is not None:
-                    stack_height_um = f"{self._last_stack.shape[0] * self._last_z_step_um:.1f}"
+                if self._last_stack is not None and self.last_z_step_um is not None:
+                    stack_height_um = f"{self._last_stack.shape[0] * self.last_z_step_um:.1f}"
                 elif self._last_stack is not None:
                     stack_height_um = f"{self._last_stack.shape[0]} slices (z step unknown)"
                 txt_path = fail_dir / f"{name}_FAILED.txt"
@@ -481,13 +481,13 @@ class DeviceSegmentationApp:
         return self.get_cropped_outputs()
 
     def save_overlay_and_slice_tifs(self, name_prefix: str, run_suffix: int, output_dir: Optional[Path] = None):
-        if self._last_image is None:
+        if self.last_image is None:
             return None, None
 
         out_dir = Path(output_dir) if output_dir is not None else Path.cwd()
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        base = np.asarray(self._last_image)
+        base = np.asarray(self.last_image)
         if base.ndim == 3:
             base = np.mean(base, axis=-1)
         base_u8 = self._scale_to_uint8_view(base)
@@ -549,9 +549,9 @@ class DeviceSegmentationApp:
         draw_corners(outer_corners_yx, (255, 255, 0))
 
         # Prefer cached mask, fallback to debug snapshot if needed.
-        organoid_mask = self._last_organoid_region
-        if organoid_mask is None and self._last_segment_debug is not None:
-            organoid_mask = self._last_segment_debug.get("organoid_region", None)
+        organoid_mask = self.last_organoid_region
+        if organoid_mask is None and self.last_segment_debug is not None:
+            organoid_mask = self.last_segment_debug.get("organoid_region", None)
         draw_mask(organoid_mask, rgb=(0, 255, 255), alpha=0.55)
 
         hough_tag = "_hough" if self._hough_fallback_used else ""
@@ -658,7 +658,7 @@ class DeviceSegmentationApp:
                 selected_lif=self._selected_lif,
                 image_index=idx,
             )
-            self._last_z_step_um = z_um
+            self.last_z_step_um = z_um
             self._last_y_step_um = y_um
             self._last_x_step_um = x_um
             self._last_xy_step_um = np.nanmean([v for v in [x_um, y_um] if v is not None]) if (x_um is not None or y_um is not None) else None
@@ -1609,12 +1609,12 @@ class DeviceSegmentationApp:
             # Preserve partial data so _save_failure_diagnostic can still
             # generate a PNG showing whatever was computed before the crash.
             try:
-                self._last_image = in_focus_plane
+                self.last_image = in_focus_plane
             except NameError:
                 pass
             return
 
-        self._last_segment_debug = debug
+        self.last_segment_debug = debug
 
         if clear_layers:
             self.viewer.layers.clear()
@@ -1622,7 +1622,7 @@ class DeviceSegmentationApp:
             self._roi_outer_layer = None
             self._cropped_layer = None
 
-        self._last_image = in_focus_plane
+        self.last_image = in_focus_plane
         self._active_device_width_um = 30.0
         self._last_geometry_vote_counts = None
         if self._roi_outer_layer is not None and self._roi_outer_layer in self.viewer.layers:
@@ -1633,7 +1633,7 @@ class DeviceSegmentationApp:
         self.cropped_xyz = None
         self._cropped_organoid_mask_xy_raw = None
         self._mask_central_region_enabled = bool(mask_central_region)
-        self._last_organoid_region = organoid_region.astype(bool) if organoid_region is not None else None
+        self.last_organoid_region = organoid_region.astype(bool) if organoid_region is not None else None
         self.device_width_ok.device_width_um.enabled = True
         self.device_width_ok.device_width_um.value = 30.0
 
@@ -1831,7 +1831,7 @@ class DeviceSegmentationApp:
         if corners_xy is None:
             self.images_output.value = "[WARN] Draw or adjust geometry first."
             return
-        if self._last_image is None:
+        if self.last_image is None:
             self.images_output.value = "[WARN] Run 'Segment + View' first."
             return
 
@@ -1879,8 +1879,8 @@ class DeviceSegmentationApp:
             self._cropped_stack_z_raw = self._cropped_stack_xy_raw
             self.cropped_xyz = self._cropped_stack_z_raw
 
-            if self._mask_central_region_enabled and self._last_organoid_region is not None:
-                organoid_mask = np.asarray(self._last_organoid_region, dtype=bool)
+            if self._mask_central_region_enabled and self.last_organoid_region is not None:
+                organoid_mask = np.asarray(self.last_organoid_region, dtype=bool)
                 target_h, target_w = int(stack_for_crop.shape[1]), int(stack_for_crop.shape[2])
                 if scale > 1:
                     organoid_mask = np.repeat(np.repeat(organoid_mask.astype(np.uint8), scale, axis=0), scale, axis=1).astype(bool)
@@ -1905,7 +1905,7 @@ class DeviceSegmentationApp:
             self.images_output.value = "[OK] Cropped aligned stack created from current geometry."
             return
 
-        cropped_img = self._crop_rectified_from_corners(self._last_image, corners_xy)
+        cropped_img = self._crop_rectified_from_corners(self.last_image, corners_xy)
         if cropped_img is None:
             self.images_output.value = "[WARN] Crop failed for selected geometry."
             return
@@ -1914,8 +1914,8 @@ class DeviceSegmentationApp:
     def get_cropped_outputs(self):
         """Return cropped data and geometry-vote metadata for downstream use."""
         z_um, y_um, x_um = self._loaded_voxel_um
-        if self._last_z_step_um is not None:
-            z_um = self._last_z_step_um
+        if self.last_z_step_um is not None:
+            z_um = self.last_z_step_um
         if self._last_y_step_um is not None:
             y_um = self._last_y_step_um
         if self._last_x_step_um is not None:
