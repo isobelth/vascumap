@@ -7,27 +7,13 @@ import napari
 from magicgui import magicgui
 from magicgui.widgets import Container, TextEdit
 from skimage import util
-from skimage.filters import threshold_triangle, median, sobel, gaussian, threshold_yen, threshold_otsu, try_all_threshold, threshold_minimum
+from skimage.filters import threshold_triangle, median, sobel, gaussian, threshold_yen, threshold_otsu, threshold_minimum
 from skimage.measure import label, regionprops_table, regionprops, moments_central
 from skimage.morphology import disk, remove_small_objects, remove_small_holes, closing
 from skimage.segmentation import expand_labels
 from skimage.transform import ProjectiveTransform, warp, probabilistic_hough_line
 from scipy.ndimage import rotate, binary_dilation, binary_erosion, binary_fill_holes
 from skimage.draw import line
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-
-def _mp_run_try_all(img_arr, out_path):
-    """Subprocess target: run try_all_threshold and save figure to file."""
-    import matplotlib as _mpl
-    _mpl.use("Agg")
-    import matplotlib.pyplot as _plt
-    from skimage.filters import try_all_threshold as _tat
-    fig, _ = _tat(img_arr, figsize=(10, 8), verbose=False)
-    fig.savefig(out_path, dpi=100)
-    _plt.close(fig)
 
 
 def _mp_run_threshold_minimum(img_arr, out_path):
@@ -37,91 +23,6 @@ def _mp_run_threshold_minimum(img_arr, out_path):
     t = _tm(img_arr, max_num_iter=500)
     _np.save(out_path, _np.array([t]))
 
-
-def _mp_run_manual_thresholds(img_arr, out_path, mode):
-    """Subprocess target: compute each threshold individually and save a
-    composite diagnostic figure.  threshold_minimum gets its own inner
-    subprocess with a kill-timeout so it can't hang this process either."""
-    import numpy as _np
-    import matplotlib as _mpl
-    _mpl.use("Agg")
-    import matplotlib.pyplot as _plt
-    from skimage.filters import (
-        threshold_isodata, threshold_li, threshold_mean,
-        threshold_otsu, threshold_triangle, threshold_yen,
-    )
-    import multiprocessing as _mp, tempfile as _tf, os as _os
-
-    methods = [
-        ("Isodata", threshold_isodata),
-        ("Li", threshold_li),
-        ("Mean", threshold_mean),
-        ("Otsu", threshold_otsu),
-        ("Triangle", threshold_triangle),
-        ("Yen", threshold_yen),
-    ]
-
-    panels = []
-    for name, fn in methods:
-        try:
-            t = fn(img_arr)
-            panels.append((name, img_arr > t, f"thresh={t:.4g}"))
-        except Exception as e:
-            panels.append((name, None, str(e)))
-
-    # threshold_minimum in a nested subprocess with kill timeout
-    try:
-        _tmp = _tf.mktemp(suffix=".npy")
-        p = _mp.Process(target=_mp_run_threshold_minimum, args=(img_arr, _tmp))
-        p.start()
-        p.join(timeout=30)
-        if p.is_alive():
-            p.kill()
-            p.join(timeout=5)
-            panels.append(("Minimum", None, "timed out (30 s)"))
-        elif p.exitcode != 0:
-            panels.append(("Minimum", None, f"exitcode {p.exitcode}"))
-        else:
-            t = float(_np.load(_tmp)[0])
-            panels.append(("Minimum", img_arr > t, f"thresh={t:.4g}"))
-        try:
-            _os.remove(_tmp)
-        except OSError:
-            pass
-    except Exception as e:
-        panels.append(("Minimum", None, str(e)))
-
-    n_panels = len(panels) + 1
-    ncols = min(n_panels, 4)
-    nrows = (n_panels + ncols - 1) // ncols
-    fig, axes = _plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
-    axes = _np.atleast_2d(_np.asarray(axes))
-
-    axes.flat[0].imshow(img_arr, cmap="gray")
-    axes.flat[0].set_title("Original", fontsize=9)
-    axes.flat[0].axis("off")
-
-    for pi, (pname, pimg, pinfo) in enumerate(panels, 1):
-        if pi >= axes.size:
-            break
-        ax = axes.flat[pi]
-        if pimg is not None:
-            ax.imshow(pimg, cmap="gray")
-            ax.set_title(f"{pname}\n{pinfo}", fontsize=8)
-        else:
-            ax.text(0.5, 0.5, f"{pname}\n{pinfo}", ha="center", va="center",
-                    fontsize=9, transform=ax.transAxes)
-            ax.set_title(pname, fontsize=8)
-        ax.axis("off")
-
-    for pi in range(n_panels, int(axes.size)):
-        axes.flat[pi].axis("off")
-
-    mode_label = "sigma-smoothed" if mode == "light" else "inverted + sigma-smoothed"
-    fig.suptitle(f"Manual threshold fallback — {mode} ({mode_label})", fontsize=10)
-    _plt.tight_layout()
-    fig.savefig(out_path, dpi=100)
-    _plt.close(fig)
 
 def read_voxel_size_um(
     source_path: Optional[Path],
@@ -327,7 +228,6 @@ class DeviceSegmentationApp:
         self.image_name = None
         self._mask_central_region_enabled = False
         self.last_organoid_region = None
-        self._last_organoid_debug = None
         self._cropped_organoid_mask_xy_raw = None
 
 
@@ -841,92 +741,6 @@ class DeviceSegmentationApp:
 
         smoothed = np.nan_to_num(smoothed, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Debug accumulator — populated as each step runs
-        dbg = {
-            "in_focus_plane": np.asarray(in_focus_plane),
-            "mode": mode,
-            "processed": smoothed.copy(),
-            "try_all_threshold_img": None,
-            "step1_method": None,
-            "step1_binary": None,
-            "step1_region": None,
-            "step1_area_frac": None,
-            "step2_triggered": False,
-            "step2_method": None,
-            "step2_binary": None,
-            "step2_region": None,
-            "step2_area_frac": None,
-            "final_region": None,
-        }
-
-        # Always generate try_all_threshold for diagnostics.
-        # Uses multiprocessing with .kill() because threshold_minimum (called
-        # internally by try_all_threshold) can hold the GIL in C code
-        # indefinitely — thread-based timeouts cannot interrupt it.
-        try:
-            import multiprocessing, tempfile, os as _os
-            diag_img = smoothed if mode == "light" else gaussian(util.invert(raw), sigma=float(self.mask_sigma)).astype(np.float32)
-
-            tmp_path = tempfile.mktemp(suffix=".png")
-            proc = multiprocessing.Process(
-                target=_mp_run_try_all,
-                args=(diag_img, tmp_path),
-            )
-            proc.start()
-            proc.join(timeout=60)
-            if proc.is_alive():
-                proc.kill()
-                proc.join(timeout=5)
-                raise TimeoutError("try_all_threshold subprocess exceeded 60 s")
-
-            if proc.exitcode != 0:
-                raise RuntimeError(f"try_all_threshold subprocess exited with code {proc.exitcode}")
-
-            from PIL import Image as _PILImage
-            dbg["try_all_threshold_img"] = np.asarray(_PILImage.open(tmp_path)).copy()
-            try:
-                _os.remove(tmp_path)
-            except OSError:
-                pass
-        except Exception as _e:
-            print(f"[organoid] try_all_threshold generation failed/timed out: {_e}")
-            try:
-                plt.close("all")
-            except Exception:
-                pass
-
-            # Fallback: run all safe thresholds + minimum in a subprocess
-            # so nothing can hang the main process.
-            try:
-                import multiprocessing as _mp_fb, tempfile as _tf_fb
-                _tmp_fb = _tf_fb.mktemp(suffix=".png")
-                _proc_fb = _mp_fb.Process(
-                    target=_mp_run_manual_thresholds,
-                    args=(diag_img, _tmp_fb, mode),
-                )
-                _proc_fb.start()
-                _proc_fb.join(timeout=120)
-                if _proc_fb.is_alive():
-                    _proc_fb.kill()
-                    _proc_fb.join(timeout=5)
-                    print("[organoid] Manual threshold fallback subprocess timed out (120 s)")
-                elif _proc_fb.exitcode != 0:
-                    print(f"[organoid] Manual threshold fallback subprocess failed (exit {_proc_fb.exitcode})")
-                else:
-                    from PIL import Image as _PILImage2
-                    dbg["try_all_threshold_img"] = np.asarray(_PILImage2.open(_tmp_fb)).copy()
-                    print("[organoid] Saved manual threshold fallback diagnostic")
-                try:
-                    import os as _os_fb
-                    _os_fb.remove(_tmp_fb)
-                except OSError:
-                    pass
-            except Exception as _fb_e:
-                print(f"[organoid] Manual threshold fallback also failed: {_fb_e}")
-
-        # Store debug early so it is available even if segmentation fails.
-        self._last_organoid_debug = dbg
-
         def score(p):
             overlap = np.sum(labelled[central_roi] == p.label)
             py, px = p.centroid
@@ -949,10 +763,6 @@ class DeviceSegmentationApp:
                 best_prop = min(props, key=score)
                 area_frac = best_prop.area / xy_area
                 light_region_mask = (labelled == best_prop.label)
-                dbg["step1_method"] = "yen_on_smoothed"
-                dbg["step1_binary"] = (smoothed > thresh).copy()
-                dbg["step1_region"] = light_region_mask.copy()
-                dbg["step1_area_frac"] = area_frac
 
                 if 0.02 < area_frac <= 0.15:
                     light_ok = True
@@ -971,13 +781,6 @@ class DeviceSegmentationApp:
             inverted = gaussian(util.invert(raw), sigma=float(self.mask_sigma)).astype(np.float32)
             inverted = np.nan_to_num(inverted, nan=0.0, posinf=0.0, neginf=0.0)
 
-            failed_light = mode == "light"
-            step_key = "step2" if failed_light else "step1"
-            if failed_light:
-                dbg["step2_triggered"] = True
-            else:
-                dbg["processed"] = inverted.copy()
-
             thresh = threshold_yen(inverted)
             hole_cutoff = int(0.015 * xy_area)
             dark_binary = remove_small_holes(inverted > thresh, area_threshold=hole_cutoff)
@@ -988,19 +791,9 @@ class DeviceSegmentationApp:
 
             best_prop = min(props, key=score)
             area_frac = best_prop.area / xy_area
-            dbg[f"{step_key}_method"] = "yen_on_inverted"
-            dbg[f"{step_key}_binary"] = (inverted > thresh).copy()
-            dbg[f"{step_key}_region"] = (labelled == best_prop.label).copy()
-            dbg[f"{step_key}_area_frac"] = area_frac
 
             # If Yen result is out of range, retry with Otsu
             if area_frac < 0.02 or area_frac > 0.15:
-                fallback_key = "step2" if step_key == "step1" else "step3"
-                if fallback_key == "step2":
-                    dbg["step2_triggered"] = True
-                else:
-                    dbg["step3_triggered"] = True
-
                 thresh = threshold_otsu(inverted)
                 otsu_binary = remove_small_holes(inverted > thresh, area_threshold=hole_cutoff)
                 labelled = label(otsu_binary)
@@ -1009,10 +802,6 @@ class DeviceSegmentationApp:
                     return np.zeros((H, W), dtype=bool)
                 best_prop = min(props, key=score)
                 area_frac_otsu = best_prop.area / xy_area
-                dbg[f"{fallback_key}_method"] = "otsu_on_inverted"
-                dbg[f"{fallback_key}_binary"] = (inverted > thresh).copy()
-                dbg[f"{fallback_key}_region"] = (labelled == best_prop.label).copy()
-                dbg[f"{fallback_key}_area_frac"] = area_frac_otsu
                 print(f"[organoid] Yen out of range ({area_frac:.1%}), Otsu fallback: {area_frac_otsu:.1%}")
 
                 # If Otsu region is too large, try eroding and re-scoring
@@ -1031,9 +820,6 @@ class DeviceSegmentationApp:
 
                 # If Otsu (or eroded Otsu) still out of range, try threshold_minimum
                 if area_frac_otsu < 0.02 or area_frac_otsu > 0.15:
-                    min_key = "step3" if fallback_key == "step2" else "step4"
-                    dbg[f"{min_key}_triggered"] = True
-
                     # threshold_minimum can hang indefinitely in C code —
                     # run it in a subprocess with a hard kill timeout.
                     import multiprocessing as _mp_min, tempfile as _tf_min
@@ -1067,10 +853,6 @@ class DeviceSegmentationApp:
                         return np.zeros((H, W), dtype=bool)
                     best_prop = min(props, key=score)
                     area_frac_min = best_prop.area / xy_area
-                    dbg[f"{min_key}_method"] = "minimum_on_inverted"
-                    dbg[f"{min_key}_binary"] = (inverted > thresh).copy()
-                    dbg[f"{min_key}_region"] = (labelled == best_prop.label).copy()
-                    dbg[f"{min_key}_area_frac"] = area_frac_min
                     print(f"[organoid] Otsu out of range ({area_frac_otsu:.1%}), threshold_minimum fallback: {area_frac_min:.1%}")
 
                     if area_frac_min < 0.02 or area_frac_min > 0.15:
@@ -1094,7 +876,6 @@ class DeviceSegmentationApp:
             else:
                 print("[organoid] light and dark regions not touching — skipping union")
 
-        dbg["final_region"] = organoid_region.copy()
         organoid_region = remove_small_holes(organoid_region, area_threshold=10000)
         organoid_region = closing(organoid_region, disk(5))
         return organoid_region
@@ -1219,13 +1000,18 @@ class DeviceSegmentationApp:
 
         organoid_region = None
         if mask_central_region:
-            organoid_region = self._mask_out_organoid(in_focus_plane, mode=mask_central_region)
-            # Use an expanded organoid mask for device segmentation only —
-            # removes organoid-proximal artefacts that disrupt edge detection.
-            organoid_mask_for_device = expand_labels(
-                label(organoid_region), distance=50
-            ).astype(bool)
-            binary[organoid_mask_for_device] = 0
+            try:
+                organoid_region = self._mask_out_organoid(in_focus_plane, mode=mask_central_region)
+            except RuntimeError as exc:
+                print(f"[organoid] segmentation failed, continuing without organoid mask: {exc}")
+                organoid_region = None
+            if organoid_region is not None:
+                # Use an expanded organoid mask for device segmentation only —
+                # removes organoid-proximal artefacts that disrupt edge detection.
+                organoid_mask_for_device = expand_labels(
+                    label(organoid_region), distance=50
+                ).astype(bool)
+                binary[organoid_mask_for_device] = 0
 
         labels = label(binary)
         data = regionprops_table(labels, binary, properties=("label", "area", "eccentricity"))

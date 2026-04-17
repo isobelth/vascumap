@@ -88,6 +88,7 @@ class CurationApp:
         device_width_um: float = 35.0,
         brightfield_channel: int = 0,
         default_organoid_mode: str = "infer",
+        on_done=None,
     ):
         """
         Parameters
@@ -104,6 +105,7 @@ class CurationApp:
         self._default_device_width_um = float(device_width_um)
         self._brightfield_channel = int(brightfield_channel)
         self._default_organoid_mode = default_organoid_mode
+        self._on_done = on_done
 
         # Build CuratedJob list
         self.jobs: list[CuratedJob] = []
@@ -145,7 +147,13 @@ class CurationApp:
     # ------------------------------------------------------------------
 
     def _auto_detect_all(self):
-        """Run device + organoid auto-detection for every job."""
+        """Run device + organoid auto-detection for every job.
+
+        Successful jobs are pre-accepted (``status='curated'``). Navigate
+        through them in napari; press ``s`` to skip any you don't want,
+        or edit the device ROI / organoid mask and press ``a`` to re-accept.
+        Edits made while navigating are auto-saved.
+        """
         print(f"Auto-detecting device regions for {len(self.jobs)} images...")
         for i, job in enumerate(self.jobs):
             print(f"  [{i+1}/{len(self.jobs)}] {job.image_name} ...", end=" ", flush=True)
@@ -192,12 +200,39 @@ class CurationApp:
             msg = str(getattr(eng.images_output, "value", "Segmentation failed"))
             raise RuntimeError(msg)
 
-        # Extract focus plane
-        focus_plane = eng.last_image
-        if focus_plane is not None:
-            focus_plane = np.asarray(focus_plane, dtype=np.float32)
-            if focus_plane.ndim == 3:
-                focus_plane = np.mean(focus_plane, axis=-1).astype(np.float32)
+        # Build the refocused image directly from the stored z-stack and the
+        # per-pixel z-map (one z per (y, x), giving the in-focus brightness
+        # at each pixel). This guarantees we display the actual refocused
+        # intensity image rather than the integer-valued zmap.
+        focus_plane = None
+        stack = getattr(eng, "_last_stack", None)
+        zmap = getattr(eng, "_last_focus_zmap_full", None)
+        ds = max(1, int(getattr(eng, "_last_focus_downsample", 1)))
+        if stack is not None and zmap is not None:
+            try:
+                arr = np.asarray(stack)
+                zm = np.asarray(zmap, dtype=np.int32)
+                if arr.ndim == 4:  # (Z, H, W, C) → reduce channel
+                    arr = np.mean(arr, axis=-1)
+                if arr.ndim == 3 and zm.shape == arr.shape[1:]:
+                    Z = arr.shape[0]
+                    zm_clip = np.clip(zm, 0, Z - 1).astype(np.int64)
+                    refocused = np.take_along_axis(
+                        arr, zm_clip[None, :, :], axis=0
+                    )[0].astype(np.float32)
+                    if ds > 1:
+                        refocused = refocused[::ds, ::ds]
+                    focus_plane = refocused
+            except Exception as exc:
+                print(f"[curation] refocused image build failed: {exc}")
+
+        # Fallback: use whatever the engine cached.
+        if focus_plane is None:
+            focus_plane = eng.last_image
+            if focus_plane is not None:
+                focus_plane = np.asarray(focus_plane, dtype=np.float32)
+                if focus_plane.ndim == 3:
+                    focus_plane = np.mean(focus_plane, axis=-1).astype(np.float32)
 
         # Extract organoid mask
         organoid_mask = None
@@ -357,12 +392,53 @@ class CurationApp:
         self._current_idx = idx
         job = self.jobs[idx]
 
-        # Update image layer
+        # Update image layer. We replace the layer entirely (rather than just
+        # updating .data) so napari recomputes contrast limits from scratch —
+        # otherwise stale limits from the previous job/dummy layer cause the
+        # image to render as solid white or black.
         if job.focus_plane is not None:
-            self._image_layer.data = job.focus_plane
-            self.viewer.reset_view()
+            data = job.focus_plane
         else:
-            self._image_layer.data = np.zeros((100, 100), dtype=np.float32)
+            data = np.zeros((100, 100), dtype=np.float32)
+        # Diagnostic: log what we're actually feeding the viewer.
+        try:
+            arr = np.asarray(data)
+            finite = arr[np.isfinite(arr)] if arr.size else arr
+            print(
+                f"[curation] focus_plane stats job={getattr(job, 'image_name', '?')} "
+                f"shape={arr.shape} dtype={arr.dtype} "
+                f"min={float(finite.min()) if finite.size else 'NA'} "
+                f"max={float(finite.max()) if finite.size else 'NA'} "
+                f"mean={float(finite.mean()) if finite.size else 'NA'} "
+                f"unique<=20={len(np.unique(finite)) <= 20}"
+            )
+        except Exception:
+            pass
+        try:
+            old_layer = self._image_layer
+            insert_idx = self.viewer.layers.index(old_layer)
+            try:
+                self._roi_layer.events.data.disconnect(self._on_roi_changed)
+            except Exception:
+                pass
+            self.viewer.layers.remove(old_layer)
+            self._image_layer = self.viewer.add_image(
+                data, name="focus_plane", colormap="gray",
+            )
+            # Move it back to the original (bottom) position
+            try:
+                self.viewer.layers.move(len(self.viewer.layers) - 1, insert_idx)
+            except Exception:
+                pass
+            try:
+                self._roi_layer.events.data.connect(self._on_roi_changed)
+            except Exception:
+                pass
+        except Exception as exc:
+            print(f"[curation] image layer refresh failed: {exc}")
+            self._image_layer.data = data
+        if job.focus_plane is not None:
+            self.viewer.reset_view()
 
         # Update organoid labels layer
         if job.organoid_mask_xy is not None and job.focus_plane is not None:
@@ -525,7 +601,7 @@ class CurationApp:
             self._show_job(self._current_idx + 1)
 
     def _done_start_batch(self):
-        """Validate all jobs and close viewer to start batch processing."""
+        """Validate all jobs, finalise curated jobs, then invoke on_done callback."""
         self._save_current_state()
 
         unresolved = [j for j in self.jobs if j.status not in ("curated", "skip")]
@@ -537,7 +613,24 @@ class CurationApp:
             )
             return
 
-        self.viewer.close()
+        self._status_label.value = "Finalising curated jobs... (see notebook output)"
+        try:
+            self.viewer.window._qt_window.repaint()
+        except Exception:
+            pass
+
+        self._finalise_jobs()
+
+        try:
+            self.viewer.close()
+        except Exception:
+            pass
+
+        if self._on_done is not None:
+            try:
+                self._on_done(self.jobs)
+            except Exception as exc:
+                print(f"[on_done callback failed] {type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------------
     # Finalise: produce cropped outputs for each curated job
@@ -717,9 +810,10 @@ class CurationApp:
 
         n_ok = sum(1 for j in self.jobs if j.status == "curated")
         n_fail = sum(1 for j in self.jobs if j.status == "failed")
-        print(f"\n{len(self.jobs)} images loaded ({n_ok} OK, {n_fail} failed).")
-        print("Shortcuts: n = next, b = back, a = accept, s = skip")
-        print("When done curating, run  app.finalise()  in the next cell.")
+        print(f"\n{len(self.jobs)} images loaded ({n_ok} auto-accepted, {n_fail} failed).")
+        print("Shortcuts: n = next, b = back, s = skip, a = re-accept after editing.")
+        print("Edits (ROI drag, mask paint) are auto-saved on navigation.")
+        print("When done, run  app.finalise()  in the next cell.")
         return self
 
     def finalise(self) -> list[CuratedJob]:
