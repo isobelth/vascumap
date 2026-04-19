@@ -297,10 +297,17 @@ class CurationApp:
             name="device_ROI", edge_color="red", face_color="transparent",
         )
         self._roi_layer.editable = True
+        try:
+            self._roi_layer.mode = "select"
+        except Exception:
+            pass
         self._roi_outer_layer = self.viewer.add_shapes(
             name="device_outer", edge_color="yellow", face_color="transparent",
         )
         self._roi_outer_layer.editable = False
+        # Re-entrancy guard so that programmatic outer updates don't trigger
+        # inner-layer change handlers and cause feedback loops.
+        self._syncing_outer_geometry = False
 
         # Connect ROI drag events
         try:
@@ -451,13 +458,26 @@ class CurationApp:
             shape = job.focus_plane.shape[:2] if job.focus_plane is not None else (100, 100)
             self._organoid_labels_layer.data = np.zeros(shape, dtype=np.int32)
 
-        # Update device ROI shapes
-        if job.inner_corners is not None:
-            corners_yx = job.inner_corners[:, ::-1]  # xy → yx
-            self._roi_layer.data = [corners_yx]
-            self._roi_layer.shape_type = ["polygon"]
-        else:
-            self._roi_layer.data = []
+        # Update device ROI shapes — use "rectangle" so napari shows the
+        # 8 edit handles (corner + edge midpoints + rotation) and constrains
+        # the shape to a rectangle.
+        self._syncing_outer_geometry = True
+        try:
+            if job.inner_corners is not None:
+                corners_yx = job.inner_corners[:, ::-1]  # xy → yx
+                self._roi_layer.data = [corners_yx]
+                self._roi_layer.shape_type = ["rectangle"]
+                self._roi_layer.edge_color = "red"
+                self._roi_layer.face_color = "transparent"
+                self._roi_layer.editable = True
+                try:
+                    self._roi_layer.mode = "select"
+                except Exception:
+                    pass
+            else:
+                self._roi_layer.data = []
+        finally:
+            self._syncing_outer_geometry = False
 
         # Update outer geometry
         self._update_outer_geometry(job)
@@ -493,8 +513,15 @@ class CurationApp:
             return
 
         expanded_yx = expanded_xy[:, ::-1]
-        self._roi_outer_layer.data = [expanded_yx]
-        self._roi_outer_layer.shape_type = ["polygon"]
+        self._syncing_outer_geometry = True
+        try:
+            self._roi_outer_layer.data = [expanded_yx]
+            self._roi_outer_layer.shape_type = ["rectangle"]
+            self._roi_outer_layer.edge_color = "yellow"
+            self._roi_outer_layer.face_color = "transparent"
+            self._roi_outer_layer.editable = False
+        finally:
+            self._syncing_outer_geometry = False
 
     def _update_status(self):
         """Update the status label and progress summary."""
@@ -560,8 +587,9 @@ class CurationApp:
         self._update_outer_geometry(job)
 
     def _on_roi_changed(self, event=None):
-        """When the user drags device corners, update the outer geometry."""
-        if self._syncing:
+        """When the user drags/resizes/rotates the device rectangle, update
+        the outer geometry to match."""
+        if self._syncing or getattr(self, "_syncing_outer_geometry", False):
             return
         job = self.jobs[self._current_idx]
         if self._roi_layer is not None and len(self._roi_layer.data) > 0:

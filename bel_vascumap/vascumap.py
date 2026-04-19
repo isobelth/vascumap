@@ -384,7 +384,59 @@ class VascuMap:
             exclusion_mask_xy=exclusion_mask_xy,
         )
         print(self.analysis_results['global_metrics_df'].to_string(index=False))
-        
+
+    def _save_trim_failure_overlay(self, save_path: Path) -> None:
+        """Save a PNG overlay of the cropped device region and (optional)
+        organoid mask, for diagnosing trim failures.
+
+        The cropped_stack is already device-rectified, so the device region
+        is simply the full extent of the image; the organoid mask (if any)
+        is overlaid in cyan.
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+
+        if self.cropped_stack is None:
+            return
+
+        stack = np.asarray(self.cropped_stack)
+        if stack.ndim == 3:
+            base = np.mean(stack, axis=0)
+        elif stack.ndim == 2:
+            base = stack
+        else:
+            return
+        base = np.asarray(base, dtype=np.float32)
+
+        H, W = base.shape[:2]
+        fig, ax = plt.subplots(figsize=(8, 8 * H / max(W, 1)))
+        ax.imshow(base, cmap='gray')
+
+        # Device region = full cropped extent (already rectified)
+        rect = mpatches.Rectangle(
+            (0, 0), W - 1, H - 1, linewidth=2, edgecolor='red', facecolor='none',
+            label='device region',
+        )
+        ax.add_patch(rect)
+
+        if self.cropped_organoid_mask_xy is not None:
+            mask = np.asarray(self.cropped_organoid_mask_xy, dtype=bool)
+            if mask.shape == (H, W) and mask.any():
+                rgba = np.zeros((H, W, 4), dtype=np.float32)
+                rgba[mask] = (0.0, 1.0, 1.0, 0.45)
+                ax.imshow(rgba)
+                ax.plot([], [], color='cyan', label='organoid mask')
+
+        ax.set_xlim(0, W - 1)
+        ax.set_ylim(H - 1, 0)
+        ax.set_axis_off()
+        ax.set_title("Trim failure: device + organoid overlay (mean projection)")
+        ax.legend(loc='upper right', framealpha=0.7)
+        fig.tight_layout()
+        fig.savefig(str(save_path), dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  Trim failure overlay → {Path(save_path).name}")
+
     def pipeline(self, output_dir: str | Path | None = None, save_all_interim: bool = False) -> None:
         """Run the full VascuMap pipeline and save outputs.
 
@@ -457,6 +509,13 @@ class VascuMap:
             debug_txt.write_text("\n".join(msg_lines), encoding="utf-8")
             print(f"  ⚠ Skipping {name_prefix}: all z-slices trimmed (too much vasculature). "
                   f"Debug info → {debug_txt.name}")
+
+            # Also save a device + organoid overlay PNG so the user can quickly
+            # see what was being processed when the trim failure occurred.
+            try:
+                self._save_trim_failure_overlay(out / f"{name_prefix}_trim_failure_overlay.png")
+            except Exception as overlay_exc:
+                print(f"  (overlay save failed: {overlay_exc})")
 
             # Save interim outputs even on trim failure so the user can
             # inspect the over-segmented result in napari.
