@@ -364,7 +364,7 @@ class DeviceSegmentationApp:
                     stack_height_um = f"{self._last_stack.shape[0] * self.last_z_step_um:.1f}"
                 elif self._last_stack is not None:
                     stack_height_um = f"{self._last_stack.shape[0]} slices (z step unknown)"
-                txt_path = fail_dir / f"{name}_FAILED.txt"
+                txt_path = fail_dir / f"{name}_debug.txt"
                 txt_path.write_text(
                     f"Image: {name}\n"
                     f"Source: {source}\n"
@@ -375,7 +375,6 @@ class DeviceSegmentationApp:
                     f"Error: {msg}\n",
                     encoding="utf-8",
                 )
-                print(f"  Failure log → {txt_path}")
             raise RuntimeError(msg)
 
         return self.get_cropped_outputs()
@@ -535,7 +534,6 @@ class DeviceSegmentationApp:
                 img = lif.images[idx]
                 image = img.asarray()
             arr = np.asarray(image)
-            print(f"  [LIF] Raw array shape: {arr.shape}  dtype={arr.dtype}")
             if arr.ndim == 2:
                 arr = arr[np.newaxis, ...]
             elif arr.ndim == 3:
@@ -545,11 +543,9 @@ class DeviceSegmentationApp:
                 ch_candidates = [i for i in range(arr.ndim) if arr.shape[i] < 4]
                 ch_axis = ch_candidates[0] if ch_candidates else int(np.argmin(arr.shape))
                 ch_idx = min(self.channel, arr.shape[ch_axis] - 1)
-                print(f"  [LIF] 4-D → extracting channel {ch_idx} along axis {ch_axis} (shape={arr.shape})")
                 arr = np.take(arr, ch_idx, axis=ch_axis)
             else:
                 raise ValueError(f"Unsupported LIF array shape: {arr.shape}")
-            print(f"  [LIF] Final stack shape: {arr.shape}")
 
             self._last_stack = arr.astype(np.float32)
             z_um, y_um, x_um = read_voxel_size_um(
@@ -766,13 +762,9 @@ class DeviceSegmentationApp:
 
                 if 0.02 < area_frac <= 0.15:
                     light_ok = True
-                    print(f"[organoid] light Yen accepted: {area_frac:.1%}")
                 elif 0.01 <= area_frac <= 0.02:
                     # Small but real central object — union with dark path
                     union_light_with_dark = True
-                    print(f"[organoid] light Yen small ({area_frac:.1%}) — will union with dark path")
-                else:
-                    print(f"[organoid] light Yen area {area_frac:.1%} out of range — falling back to dark path")
 
         # ------------------------------------------------------------------
         # DARK path (also used when light fails): Yen on inverted image
@@ -802,7 +794,6 @@ class DeviceSegmentationApp:
                     return np.zeros((H, W), dtype=bool)
                 best_prop = min(props, key=score)
                 area_frac_otsu = best_prop.area / xy_area
-                print(f"[organoid] Yen out of range ({area_frac:.1%}), Otsu fallback: {area_frac_otsu:.1%}")
 
                 # If Otsu region is too large, try eroding and re-scoring
                 if area_frac_otsu > 0.15:
@@ -812,7 +803,6 @@ class DeviceSegmentationApp:
                     if props_eroded:
                         best_eroded = min(props_eroded, key=score)
                         area_frac_eroded = best_eroded.area / xy_area
-                        print(f"[organoid] Otsu too large ({area_frac_otsu:.1%}), erosion(disk=10): {area_frac_eroded:.1%}")
                         if 0.02 <= area_frac_eroded <= 0.15:
                             labelled = labelled_eroded
                             best_prop = best_eroded
@@ -833,14 +823,11 @@ class DeviceSegmentationApp:
                     if _proc_min.is_alive():
                         _proc_min.kill()
                         _proc_min.join(timeout=5)
-                        print("[organoid] threshold_minimum timed out (30 s) — falling back to Otsu")
                         thresh = threshold_otsu(inverted)
                     elif _proc_min.exitcode != 0:
-                        print(f"[organoid] threshold_minimum subprocess failed (exit {_proc_min.exitcode}) — falling back to Otsu")
                         thresh = threshold_otsu(inverted)
                     else:
                         thresh = float(np.load(_tmp_min)[0])
-                        print(f"[organoid] threshold_minimum converged: thresh={thresh:.4g}")
                     try:
                         import os as _os_min
                         _os_min.remove(_tmp_min)
@@ -853,7 +840,6 @@ class DeviceSegmentationApp:
                         return np.zeros((H, W), dtype=bool)
                     best_prop = min(props, key=score)
                     area_frac_min = best_prop.area / xy_area
-                    print(f"[organoid] Otsu out of range ({area_frac_otsu:.1%}), threshold_minimum fallback: {area_frac_min:.1%}")
 
                     if area_frac_min < 0.02 or area_frac_min > 0.15:
                         raise RuntimeError(
@@ -871,10 +857,6 @@ class DeviceSegmentationApp:
             touching = np.any(binary_dilation(light_region_mask) & organoid_region)
             if touching:
                 organoid_region = organoid_region | light_region_mask
-                combined_frac = np.sum(organoid_region) / xy_area
-                print(f"[organoid] union of light + dark regions: {combined_frac:.1%}")
-            else:
-                print("[organoid] light and dark regions not touching — skipping union")
 
         organoid_region = remove_small_holes(organoid_region, area_threshold=10000)
         organoid_region = closing(organoid_region, disk(5))
@@ -1002,8 +984,7 @@ class DeviceSegmentationApp:
         if mask_central_region:
             try:
                 organoid_region = self._mask_out_organoid(in_focus_plane, mode=mask_central_region)
-            except RuntimeError as exc:
-                print(f"[organoid] segmentation failed, continuing without organoid mask: {exc}")
+            except RuntimeError:
                 organoid_region = None
             if organoid_region is not None:
                 # Use an expanded organoid mask for device segmentation only —
@@ -1093,12 +1074,10 @@ class DeviceSegmentationApp:
                 area_fraction = best_c.area / (ch * cw)
                 if rc is not None and not self._corners_touch_border(rc, rescue_mask.shape, margin=5):
                     if area_fraction < 0.40:
-                        print(f"  [Dilation rescue] disk({dil_radius}) found device but area is only {area_fraction:.1%} of image — still running Hough ({reason})")
                         break
                     new_corners, new_angle_rad, new_centroid_xy = rc, ra, rce
                     rescue_closed_mask = closed
                     rescue_radius = dil_radius
-                    print(f"  [Dilation rescue] Sealed border gaps with disk({dil_radius}) — skipping Hough ({reason})")
                     rescued = True
                     break
 
@@ -1106,7 +1085,6 @@ class DeviceSegmentationApp:
             #         Retry with +100 line_length/line_gap if corners still touch borders.
             if not rescued:
                 self._hough_fallback_used = True
-                print(f"  [Hough fallback] Primary device detection failed ({reason}) — using probabilistic Hough lines")
                 edges = post_dilation_mask
 
                 ll = self.line_length
@@ -1118,7 +1096,6 @@ class DeviceSegmentationApp:
                         ll += 0
                         lg += 100
                         lt += 5
-                        print(f"  [Hough retry {hough_attempt}] Increasing line_length={ll}, line_gap={lg}")
 
                     segs = probabilistic_hough_line(
                         edges,
@@ -1188,7 +1165,6 @@ class DeviceSegmentationApp:
             final_corners = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=float)
             final_angle_rad = 0.0
             final_centroid_xy = np.array([w / 2.0, h / 2.0])
-            print("  [Fallback] No device found — using entire image as device region")
 
         cropped_rotated = self._crop_rectified_from_corners(in_focus_plane, final_corners)
 
@@ -1360,7 +1336,6 @@ class DeviceSegmentationApp:
             else:
                 source_path = self._image_paths[image_index]
                 arr = np.asarray(tifffile.imread(str(source_path)))
-                print(f"  [TIFF] Raw array shape: {arr.shape}  dtype={arr.dtype}")
 
                 # Multi-channel TIFF: extract the requested channel to get a 3-D stack
                 if arr.ndim == 4:
@@ -1368,9 +1343,7 @@ class DeviceSegmentationApp:
                     ch_candidates = [i for i in range(arr.ndim) if arr.shape[i] < 4]
                     ch_axis = ch_candidates[0] if ch_candidates else int(np.argmin(arr.shape))
                     ch_idx = min(self.channel, arr.shape[ch_axis] - 1)
-                    print(f"  [TIFF] 4-D → extracting channel {ch_idx} along axis {ch_axis} (shape={arr.shape})")
                     arr = np.take(arr, ch_idx, axis=ch_axis)
-                print(f"  [TIFF] Final stack shape: {arr.shape}")
 
                 z_um, y_um, x_um = read_voxel_size_um(Path(source_path), source_is_lif=False)
                 self._set_last_voxel_steps(z_um, y_um, x_um)

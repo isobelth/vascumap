@@ -9,6 +9,7 @@ from models import Pix2Pix, load_segmentation_model, predict_mask_ortho, process
 from utils import scale, resize_dask
 from skeletonisation import clean_and_analyse, trim_segmentation, generate_skeleton_overview_plot, build_internal_pore_label_volumes, graph2image
 import pickle
+import time
 
 filterwarnings('ignore')
 
@@ -142,7 +143,6 @@ class VascuMap:
             
         if not z_votes:
             z_votes = self.z_votes
-        print(f"Initial z votes {self.z_votes}")
 
         if z_votes is None or len(z_votes) == 0:
             print("No z-vote data available – skipping preprocess.")
@@ -212,8 +212,6 @@ class VascuMap:
         self.pre_z_um = float(pixel_size_um["z_um"])
         self.cropped_stack = resize_dask(self.cropped_stack, [pixel_size_um["z_um"] / 5.0, pixel_size_um["y_um"] / 2.0, pixel_size_um["x_um"] / 2.0])
         
-        print(f"First cropping to z: {self.initial_z_range}")
-        print(f"Stack width {(z_step * final_length)}")
 
     def model_inference(self, cropped_stack: np.ndarray = None, device: Literal['cuda', 'cpu'] = 'cuda') -> None:
         """Run Pix2Pix vessel translation and UNet segmentation on the cropped stack."""
@@ -299,7 +297,6 @@ class VascuMap:
 
         global_z0 = zs[best_start]
         global_z1 = zs[best_end]
-        print(f"strong contiguous vote planes {global_z0}-{global_z1}")
 
         rel_z0 = global_z0 - int(self.pre_z_start_global)
         rel_z1 = global_z1 - int(self.pre_z_start_global)
@@ -332,7 +329,6 @@ class VascuMap:
             print("No vessel_mask_iso available – skipping analysis.")
             return
 
-        print("Running skeletonisation and analysis...")
         # Build exclusion mask matched to vessel_mask_iso shape if organoid masking was used
         exclusion_mask_xy = None
         if self.mask_central_region_enabled and self.cropped_organoid_mask_xy is not None:
@@ -370,7 +366,6 @@ class VascuMap:
             resized = resized[:target_h, :target_w]
             if np.any(resized):
                 exclusion_mask_xy = resized
-                print(f"Organoid exclusion mask applied: {int(np.count_nonzero(exclusion_mask_xy))} pixels excluded per z-slice")
 
         # Zero out reconstructed vasculature inside the organoid region
         if exclusion_mask_xy is not None:
@@ -385,57 +380,32 @@ class VascuMap:
         )
         print(self.analysis_results['global_metrics_df'].to_string(index=False))
 
-    def _save_trim_failure_overlay(self, save_path: Path) -> None:
-        """Save a PNG overlay of the cropped device region and (optional)
-        organoid mask, for diagnosing trim failures.
-
-        The cropped_stack is already device-rectified, so the device region
-        is simply the full extent of the image; the organoid mask (if any)
-        is overlaid in cyan.
-        """
-        import matplotlib.pyplot as plt
-        import matplotlib.patches as mpatches
-
-        if self.cropped_stack is None:
-            return
-
-        stack = np.asarray(self.cropped_stack)
-        if stack.ndim == 3:
-            base = np.mean(stack, axis=0)
-        elif stack.ndim == 2:
-            base = stack
-        else:
-            return
-        base = np.asarray(base, dtype=np.float32)
-
-        H, W = base.shape[:2]
-        fig, ax = plt.subplots(figsize=(8, 8 * H / max(W, 1)))
-        ax.imshow(base, cmap='gray')
-
-        # Device region = full cropped extent (already rectified)
-        rect = mpatches.Rectangle(
-            (0, 0), W - 1, H - 1, linewidth=2, edgecolor='red', facecolor='none',
-            label='device region',
+    def _write_debug_txt(self, out: Path, name_prefix: str, error_category: str, body_lines: list) -> None:
+        """Write the unified per-image failure note. Only called on failure."""
+        src = Path(self.image_source_path) if self.image_source_path else None
+        # Stack height in um from cropped_stack (2 um iso post-preprocess if available)
+        stack_height_um = "unknown"
+        if self.cropped_stack is not None:
+            try:
+                z = int(np.asarray(self.cropped_stack).shape[0])
+                z_um = float(self.pre_z_um) if self.pre_z_um else 2.0
+                stack_height_um = f"{z * z_um:.1f}"
+            except Exception:
+                pass
+        header = [
+            f"Image: {name_prefix}",
+            f"Source: {src if src else ''}",
+            f"Image index: {int(self.image_index)}",
+            f"Device width (um): {self.device_width_um}",
+            f"Mask central region: {self.mask_central_region_enabled}",
+            f"Stack height (um): {stack_height_um}",
+            "",
+            f"Error category: {error_category}",
+            "",
+        ]
+        (out / f"{name_prefix}_debug.txt").write_text(
+            "\n".join(header + body_lines) + "\n", encoding="utf-8",
         )
-        ax.add_patch(rect)
-
-        if self.cropped_organoid_mask_xy is not None:
-            mask = np.asarray(self.cropped_organoid_mask_xy, dtype=bool)
-            if mask.shape == (H, W) and mask.any():
-                rgba = np.zeros((H, W, 4), dtype=np.float32)
-                rgba[mask] = (0.0, 1.0, 1.0, 0.45)
-                ax.imshow(rgba)
-                ax.plot([], [], color='cyan', label='organoid mask')
-
-        ax.set_xlim(0, W - 1)
-        ax.set_ylim(H - 1, 0)
-        ax.set_axis_off()
-        ax.set_title("Trim failure: device + organoid overlay (mean projection)")
-        ax.legend(loc='upper right', framealpha=0.7)
-        fig.tight_layout()
-        fig.savefig(str(save_path), dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        print(f"  Trim failure overlay → {Path(save_path).name}")
 
     def pipeline(self, output_dir: str | Path | None = None, save_all_interim: bool = False) -> None:
         """Run the full VascuMap pipeline and save outputs.
@@ -451,6 +421,8 @@ class VascuMap:
         out = Path(output_dir) if output_dir is not None else Path.cwd()
         out.mkdir(parents=True, exist_ok=True)
 
+        t_pipeline_start = time.perf_counter()
+
         # ── 2-D device overlay ────────────────────────────────────────────
         if self.app is not None:
             self.app.save_overlay_and_slice_tifs(
@@ -463,59 +435,64 @@ class VascuMap:
             if organoid_mask.size > 0:
                 organoid_fraction = np.count_nonzero(organoid_mask) / organoid_mask.size
                 if organoid_fraction > 0.40:
-                    print(
-                        f"  ⚠ Skipping {name_prefix}: organoid covers "
-                        f"{organoid_fraction:.1%} of the image (>40% threshold). "
-                        f"Device segmentation outputs saved."
-                    )
+                    self._write_debug_txt(out, name_prefix, "organoid_too_large", [
+                        f"Organoid covers {organoid_fraction:.1%} of the image (>40% threshold).",
+                        "Device segmentation outputs saved; downstream stages skipped.",
+                    ])
+                    print(f"  ⚠ Skipping {name_prefix}: organoid covers {organoid_fraction:.1%} of image.")
                     return
 
         # ── Stage 1: z-selection + isotropic resize ──────────────────────
+        t0 = time.perf_counter()
         result = self.preprocess()
         if result is None and self.cropped_stack is None:
+            self._write_debug_txt(out, name_prefix, "no_valid_z_range", [
+                "preprocess() found no valid z-range / cropped stack.",
+            ])
             print(f"  ⚠ Skipping {name_prefix}: no valid z-range / cropped stack.")
             return
+        print(f"  Preprocess: {time.perf_counter() - t0:.1f} s")
 
         # ── Stage 2: Translation + segmentation ──────────────────────────
+        t0 = time.perf_counter()
         self.model_inference(device="cuda")
+        print(f"  Model inference: {time.perf_counter() - t0:.1f} s")
+
+        t0 = time.perf_counter()
         self.postprocess()
+        print(f"  Postprocess: {time.perf_counter() - t0:.1f} s")
 
         if self.z_start_final is None:
+            self._write_debug_txt(out, name_prefix, "no_strong_vote_planes", [
+                "postprocess() found no strong contiguous vote planes.",
+            ])
             print(f"  ⚠ Skipping {name_prefix}: postprocess found no strong vote planes.")
             return
 
         # ── Trim over-segmented edge slices ──────────────────────────────
+        t0 = time.perf_counter()
         orig_z = self.vessel_mask_iso.shape[0]
         trimmed, trim_start, trim_stop = trim_segmentation(self.vessel_mask_iso)
         if trimmed.shape[0] == 0:
             # Every z-slice exceeded the fill threshold — nothing left
             slice_fill = self.vessel_mask_iso.astype(bool).mean(axis=(1, 2))
-            msg_lines = [
-                f"No vasculature retained for '{name_prefix}'.",
-                "",
-                "All {0} z-slices were trimmed because their segmentation fill".format(orig_z),
+            body = [
+                f"All {orig_z} z-slices were trimmed because their segmentation fill",
                 "fraction exceeded the 75% threshold (too much vasculature).",
                 "",
                 "Per-slice fill fractions:",
             ]
             for i, frac in enumerate(slice_fill):
-                msg_lines.append(f"  slice {i:4d}: {frac:.4f}")
-            msg_lines.append("")
-            msg_lines.append("Possible causes:")
-            msg_lines.append("  - The model over-segmented this image (e.g. noisy input).")
-            msg_lines.append("  - The device region was not cropped tightly enough.")
-            msg_lines.append("  - The z-range selection included out-of-focus planes.")
-            debug_txt = out / f"{name_prefix}_trim_failure_debug.txt"
-            debug_txt.write_text("\n".join(msg_lines), encoding="utf-8")
-            print(f"  ⚠ Skipping {name_prefix}: all z-slices trimmed (too much vasculature). "
-                  f"Debug info → {debug_txt.name}")
-
-            # Also save a device + organoid overlay PNG so the user can quickly
-            # see what was being processed when the trim failure occurred.
-            try:
-                self._save_trim_failure_overlay(out / f"{name_prefix}_trim_failure_overlay.png")
-            except Exception as overlay_exc:
-                print(f"  (overlay save failed: {overlay_exc})")
+                body.append(f"  slice {i:4d}: {frac:.4f}")
+            body.extend([
+                "",
+                "Possible causes:",
+                "  - The model over-segmented this image (e.g. noisy input).",
+                "  - The device region was not cropped tightly enough.",
+                "  - The z-range selection included out-of-focus planes.",
+            ])
+            self._write_debug_txt(out, name_prefix, "all_slices_trimmed", body)
+            print(f"  ⚠ Skipping {name_prefix}: all z-slices trimmed (too much vasculature).")
 
             # Save interim outputs even on trim failure so the user can
             # inspect the over-segmented result in napari.
@@ -532,8 +509,6 @@ class VascuMap:
                         self.vessel_pred_iso)
                 np.save(str(out / f"{name_prefix}_vessel_mask.npy"),
                         self.vessel_mask_iso)
-                print(f"  Saved interim outputs (pre-trim) for napari debugging")
-
             return
         if trim_start > 0 or trim_stop < orig_z:
             old_z0 = self.z_start_final
@@ -541,12 +516,15 @@ class VascuMap:
             self.vessel_pred_iso = self.vessel_pred_iso[trim_start:trim_stop]
             self.z_start_final = old_z0 + trim_start
             self.z_stop_final = old_z0 + trim_stop
-            print(f"  Trimmed {trim_start} top / {orig_z - trim_stop} bottom over-segmented z-slices")
+        print(f"  Trim: {time.perf_counter() - t0:.1f} s")
 
         # ── Stage 3: Skeletonisation + analysis ──────────────────────────
+        t0 = time.perf_counter()
         self.skeletonisation_and_analysis()
+        print(f"  Skeletonisation + analysis: {time.perf_counter() - t0:.1f} s")
 
         # ── Skeleton overview plot ────────────────────────────────────────
+        t0 = time.perf_counter()
         app_debug = getattr(self.app, 'last_segment_debug', None) or {}
         generate_skeleton_overview_plot(
             self.vessel_mask_iso,
@@ -559,20 +537,17 @@ class VascuMap:
             device_corners_xy=app_debug.get('final_corners'),
             organoid_mask_full_xy=getattr(self.app, 'last_organoid_region', None),
         )
-        print(f"  Skeleton overview → {name_prefix}_skeleton_overview.png")
 
-        # ── Metrics CSV (always saved) ────────────────────────────────────
+        # ── Metrics CSVs (always saved) ──────────────────────────────────
         ar = self.analysis_results
-        metrics_df = ar['global_metrics_df'].copy()
-        # Prepend identification columns
         src = Path(self.image_source_path) if self.image_source_path else None
+
+        metrics_df = ar['global_metrics_df'].copy()
         metrics_df.insert(0, 'image_name', name_prefix)
         metrics_df.insert(1, 'source_file', src.name if src else '')
         metrics_df.insert(2, 'image_index', int(self.image_index))
         metrics_df.to_csv(str(out / f"{name_prefix}_analysis_metrics.csv"), index=False)
-        print(f"  Metrics → {name_prefix}_analysis_metrics.csv")
 
-        # ── All morphological parameters CSV (always saved) ──────────────
         all_params_df = ar.get('all_morphological_params_df', pd.DataFrame()).copy()
         if all_params_df is not None and not all_params_df.empty:
             all_params_df.insert(0, 'image_name', name_prefix)
@@ -583,36 +558,25 @@ class VascuMap:
                                           'source_file': [src.name if src else ''],
                                           'image_index': [int(self.image_index)]})
         all_params_df.to_csv(str(out / f"{name_prefix}_all_morphological_params.csv"), index=False)
-        print(f"  All params → {name_prefix}_all_morphological_params.csv")
 
-        # ── Branch-level metrics CSV (always saved) ──────────────────────
         branch_df = ar.get('branch_metrics_df', pd.DataFrame()).copy()
-        if branch_df is not None and not branch_df.empty:
-            branch_df.insert(0, 'image_name', name_prefix)
-            branch_df.insert(1, 'source_file', src.name if src else '')
-            branch_df.insert(2, 'image_index', int(self.image_index))
-            branch_df.to_csv(str(out / f"{name_prefix}_branch_metrics.csv"), index=False)
-            print(f"  Branch metrics → {name_prefix}_branch_metrics.csv")
-        else:
-            # still write an empty schema-consistent file for downstream joins
-            branch_df = branch_df if isinstance(branch_df, pd.DataFrame) else pd.DataFrame()
-            branch_df.insert(0, 'image_name', name_prefix)
-            branch_df.insert(1, 'source_file', src.name if src else '')
-            branch_df.insert(2, 'image_index', int(self.image_index))
-            branch_df.to_csv(str(out / f"{name_prefix}_branch_metrics.csv"), index=False)
-            print(f"  Branch metrics → {name_prefix}_branch_metrics.csv (empty)")
+        if not isinstance(branch_df, pd.DataFrame):
+            branch_df = pd.DataFrame()
+        branch_df.insert(0, 'image_name', name_prefix)
+        branch_df.insert(1, 'source_file', src.name if src else '')
+        branch_df.insert(2, 'image_index', int(self.image_index))
+        branch_df.to_csv(str(out / f"{name_prefix}_branch_metrics.csv"), index=False)
+        print(f"  Save outputs: {time.perf_counter() - t0:.1f} s")
 
         # ── Extra outputs for full napari visualisation ───────────────────
         if save_all_interim:
-
-            # ── Aligned cropped stack (2 µm iso) ─────────────────────────
+            t0 = time.perf_counter()
             z0, z1, ptr = self.z_start_final, self.z_stop_final, self.pixels_to_remove
             if z0 is not None and z1 is not None and ptr is not None:
                 cropped_stack_iso = resize_dask(self.cropped_stack, [2.5, 1, 1])
                 H, W = cropped_stack_iso.shape[1], cropped_stack_iso.shape[2]
                 cropped_stack_aligned = cropped_stack_iso[z0:z1, ptr:H - ptr, ptr:W - ptr]
                 np.save(str(out / f"{name_prefix}_cropped_stack_aligned.npy"), cropped_stack_aligned)
-                print(f"  Aligned 3-D shape: {cropped_stack_aligned.shape}  (2 µm iso)")
 
             np.save(str(out / f"{name_prefix}_vessel_translation_aligned.npy"), self.vessel_pred_iso)
             np.save(str(out / f"{name_prefix}_clean_segmentation.npy"), ar["clean_segmentation"])
@@ -634,7 +598,6 @@ class VascuMap:
             np.save(str(out / f"{name_prefix}_full_graph_skeleton.npy"), full_skel)
             np.save(str(out / f"{name_prefix}_vessel_mask.npy"), self.vessel_mask_iso)
 
-            # Graph node coordinates (sprout vs junction) as .npz
             clean_graph = ar["clean_graph"]
             node_ids = list(clean_graph.nodes())
             if node_ids:
@@ -645,7 +608,6 @@ class VascuMap:
 
             with open(str(out / f"{name_prefix}_clean_graph.pkl"), "wb") as f:
                 pickle.dump(clean_graph, f)
+            print(f"  Save interim: {time.perf_counter() - t0:.1f} s")
 
-            print(f"  Saved all interim outputs for napari visualisation")
-
-        print(f"  ✓ Done: {name_prefix}")
+        print(f"  ✓ Done: {name_prefix} (total {time.perf_counter() - t_pipeline_start:.1f} s)")
