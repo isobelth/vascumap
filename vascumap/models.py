@@ -194,6 +194,7 @@ class Pix2Pix(pl.LightningModule):
         return [generator_optimizer, discriminator_optimizer], [genertator_lr_scheduler, discriminator_lr_scheduler]
 
     def training_step(self, batch, batch_idx, TRAIN_BATCH_SIZE=6, LAMBDA=100):
+        """Run one Pix2Pix training step, updating discriminator then generator."""
         # Optimizers
         generator_optimizer, discriminator_optimizer = self.optimizers()
         generator_lr_scheduler, discriminator_lr_scheduler = self.lr_schedulers()
@@ -251,6 +252,7 @@ class Pix2Pix(pl.LightningModule):
         return loss
     
     def validation_step(self, batch, batch_idx):
+        """Compute generator and discriminator metrics on a validation batch."""
 
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 

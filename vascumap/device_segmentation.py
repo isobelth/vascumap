@@ -16,7 +16,7 @@ from scipy.ndimage import rotate, binary_dilation, binary_erosion, binary_fill_h
 from skimage.draw import line
 
 
-def _mp_run_threshold_minimum(img_arr, out_path):
+def mp_run_threshold_minimum(img_arr, out_path):
     """Subprocess target: run threshold_minimum and save result to .npy."""
     import numpy as _np
     from skimage.filters import threshold_minimum as _tm
@@ -197,8 +197,8 @@ class DeviceSegmentationApp:
 
         self._selected_image_folder: Optional[Path] = None
         self._selected_lif: Optional[Path] = None
-        self._image_paths = []
-        self._image_choice_map = {}
+        self.image_paths = []
+        self.image_choice_map = {}
 
         self._roi_layer = None
         self._roi_outer_layer = None
@@ -209,16 +209,16 @@ class DeviceSegmentationApp:
         self._hough_fallback_used = False
         self.last_segment_debug = None
 
-        self._last_stack = None
-        self._last_focus_downsample = 1
-        self._last_focus_n_sampling = 10
-        self._last_focus_patch = 50
-        self._last_focus_zmap_full = None
+        self.last_stack = None
+        self.last_focus_downsample = 1
+        self.last_focus_n_sampling = 10
+        self.last_focus_patch = 50
+        self.last_focus_zmap_full = None
 
         self.last_z_step_um = None
-        self._last_y_step_um = None
-        self._last_x_step_um = None
-        self._last_xy_step_um = None
+        self.last_y_step_um = None
+        self.last_x_step_um = None
+        self.last_xy_step_um = None
         self._last_geometry_vote_counts = None
         self._loaded_voxel_um = (None, None, None)
 
@@ -244,7 +244,7 @@ class DeviceSegmentationApp:
             call_button="Load images",
         )
         def list_images(image_source = Path()):
-            self._list_images(image_source)
+            self.list_images(image_source)
 
         @magicgui(
             image_choice={"label": "Image", "choices": ["(load images)"], "widget_type": "ComboBox"},
@@ -256,7 +256,7 @@ class DeviceSegmentationApp:
             mask_central_region: bool = False,
             clear_layers: bool = True,
         ):
-            self._segment_and_view(
+            self.segment_and_view(
                 image_choice=image_choice,
                 focus_downsample=4,
                 focus_n_sampling=10,
@@ -267,7 +267,7 @@ class DeviceSegmentationApp:
 
         @magicgui(call_button="Create cropped aligned")
         def apply_crop():
-            self._apply_crop_from_roi()
+            self.apply_crop_from_roi()
 
         @magicgui(
             auto_call=True,
@@ -275,18 +275,18 @@ class DeviceSegmentationApp:
             device_width_um={"label": "Device width (um)", "min": 0.0, "max": 1000.0, "step": 1.0},
         )
         def device_width_ok(device_width_um: float = 0.0):
-            self._apply_device_width_layer(device_width_um)
+            self.apply_device_width_layer(device_width_um)
 
-        self.list_images = list_images
-        self.segment_and_view = segment_and_view
+        self.list_images_widget = list_images
+        self.segment_and_view_widget = segment_and_view
         self.apply_crop = apply_crop
         self.device_width_ok = device_width_ok
 
 
         self.main_panel = Container(
             widgets=[
-                self.list_images,
-                self.segment_and_view,
+                self.list_images_widget,
+                self.segment_and_view_widget,
                 self.device_width_ok,
                 self.apply_crop,
                 self.images_output,
@@ -294,28 +294,28 @@ class DeviceSegmentationApp:
         )
         self.viewer.window.add_dock_widget(self.main_panel, area="right")
 
-        self._update_segment_button()
+        self.update_segment_button()
 
-    def _fmt_um(self, value):
+    def fmt_um(self, value):
         try:
             vf = float(value)
             return f"{vf:.4g}" if np.isfinite(vf) else "NA"
         except Exception:
             return "NA"
 
-    def _voxel_log_text(self, z_um, y_um, x_um):
-        return f"Voxel size (um): x={self._fmt_um(x_um)}, y={self._fmt_um(y_um)}, z={self._fmt_um(z_um)}"
+    def voxel_log_text(self, z_um, y_um, x_um):
+        return f"Voxel size (um): x={self.fmt_um(x_um)}, y={self.fmt_um(y_um)}, z={self.fmt_um(z_um)}"
 
-    def _reset_image_choices(self):
-        self._image_choice_map = {}
-        self.segment_and_view.image_choice.choices = ["(load images)"]
-        self.segment_and_view.image_choice.value = "(load images)"
+    def reset_image_choices(self):
+        self.image_choice_map = {}
+        self.segment_and_view_widget.image_choice.choices = ["(load images)"]
+        self.segment_and_view_widget.image_choice.value = "(load images)"
 
-    def _set_last_voxel_steps(self, z_um, y_um, x_um):
+    def set_last_voxel_steps(self, z_um, y_um, x_um):
         self.last_z_step_um = z_um
-        self._last_y_step_um = y_um
-        self._last_x_step_um = x_um
-        self._last_xy_step_um = np.nanmean([v for v in [x_um, y_um] if v is not None]) if (x_um is not None or y_um is not None) else None
+        self.last_y_step_um = y_um
+        self.last_x_step_um = x_um
+        self.last_xy_step_um = np.nanmean([v for v in [x_um, y_um] if v is not None]) if (x_um is not None or y_um is not None) else None
 
     def run_automatic(
         self,
@@ -326,13 +326,13 @@ class DeviceSegmentationApp:
         failure_output_dir: Optional[Path] = None,
     ):
         source = Path(image_source)
-        self._list_images(source)
+        self.list_images(source)
 
-        if not self._image_choice_map:
+        if not self.image_choice_map:
             raise ValueError("Could not load images for automatic segmentation.")
 
         selected_label = None
-        for label, idx in self._image_choice_map.items():
+        for label, idx in self.image_choice_map.items():
             if int(idx) == int(image_index):
                 selected_label = label
                 break
@@ -340,7 +340,7 @@ class DeviceSegmentationApp:
         if selected_label is None:
             raise ValueError(f"image_index {image_index} is out of range for source: {source}")
 
-        self._segment_and_view(
+        self.segment_and_view(
             image_choice=selected_label,
             focus_downsample=4,
             focus_n_sampling=10,
@@ -349,8 +349,8 @@ class DeviceSegmentationApp:
             clear_layers=True,
         )
 
-        self._apply_device_width_layer(float(device_width_um))
-        self._apply_crop_from_roi()
+        self.apply_device_width_layer(float(device_width_um))
+        self.apply_crop_from_roi()
 
         if self.cropped_xyz is None:
             msg = str(getattr(self.images_output, "value", "Automatic segmentation failed."))
@@ -360,10 +360,10 @@ class DeviceSegmentationApp:
                 name = getattr(self, "image_name", None) or f"img{image_index}"
                 # Compute stack height in um
                 stack_height_um = "unknown"
-                if self._last_stack is not None and self.last_z_step_um is not None:
-                    stack_height_um = f"{self._last_stack.shape[0] * self.last_z_step_um:.1f}"
-                elif self._last_stack is not None:
-                    stack_height_um = f"{self._last_stack.shape[0]} slices (z step unknown)"
+                if self.last_stack is not None and self.last_z_step_um is not None:
+                    stack_height_um = f"{self.last_stack.shape[0] * self.last_z_step_um:.1f}"
+                elif self.last_stack is not None:
+                    stack_height_um = f"{self.last_stack.shape[0]} slices (z step unknown)"
                 txt_path = fail_dir / f"{name}_debug.txt"
                 txt_path.write_text(
                     f"Image: {name}\n"
@@ -389,7 +389,7 @@ class DeviceSegmentationApp:
         base = np.asarray(self.last_image)
         if base.ndim == 3:
             base = np.mean(base, axis=-1)
-        base_u8 = self._scale_to_uint8_view(base)
+        base_u8 = self.scale_to_uint8_view(base)
 
         overlay = np.stack([base_u8, base_u8, base_u8], axis=-1)
 
@@ -460,16 +460,16 @@ class DeviceSegmentationApp:
         return overlay_path
 
     # -------- Focus helpers (integrated; no separate class) --------
-    def _to_gray(self, im):
+    def to_gray(self, im):
         if im.ndim == 2:
             return im
         return np.mean(im, axis=-1)
 
-    def _focus_score(self, patch):
-        p = np.asarray(self._to_gray(patch), dtype=float)
+    def focus_score(self, patch):
+        p = np.asarray(self.to_gray(patch), dtype=float)
         return float(np.std(sobel(p)))
 
-    def _curved_plane_refocus(self, stack_zyx, grid=20, patch=50, mask=None):
+    def curved_plane_refocus(self, stack_zyx, grid=20, patch=50, mask=None):
         Z, H, W = stack_zyx.shape
         ys = np.linspace(patch // 2, H - patch // 2 - 1, grid).astype(int)
         xs = np.linspace(patch // 2, W - patch // 2 - 1, grid).astype(int)
@@ -480,19 +480,19 @@ class DeviceSegmentationApp:
                 if mask is not None and not mask[y, x]:
                     continue
                 sl = (slice(y - patch // 2, y + patch // 2), slice(x - patch // 2, x + patch // 2))
-                f = np.array([self._focus_score(stack_zyx[z][sl]) for z in range(Z)], dtype=np.float32)
+                f = np.array([self.focus_score(stack_zyx[z][sl]) for z in range(Z)], dtype=np.float32)
                 pts.append((x, y))
                 zs.append(int(np.argmax(f)))
 
         if len(zs) < 6:
             scores = []
             for z in range(Z):
-                sl = self._to_gray(stack_zyx[z])
+                sl = self.to_gray(stack_zyx[z])
                 if mask is not None:
                     sl = sl * mask
                 scores.append(np.std(sobel(sl)))
             z0 = int(np.argmax(scores))
-            img = self._to_gray(stack_zyx[z0])
+            img = self.to_gray(stack_zyx[z0])
             zmap = np.full(stack_zyx.shape[1:], z0, dtype=np.int16)
             return img, zmap, np.array(pts), np.array(zs)
 
@@ -524,7 +524,7 @@ class DeviceSegmentationApp:
         zmap = np.clip(np.rint(zmap).astype(np.int16), 0, Z - 1)
         img = np.take_along_axis(stack_zyx, zmap[None, :, :], axis=0)[0]
         return img, zmap, pts, zs
-    def _compute_focus_plane_from_stack(self, stack: Optional[np.ndarray], downsample: int, n_sampling: int, patch: int, source_is_lif: bool = False, image_index: Optional[int] = None):
+    def compute_focus_plane_from_stack(self, stack: Optional[np.ndarray], downsample: int, n_sampling: int, patch: int, source_is_lif: bool = False, image_index: Optional[int] = None):
         # Unified focus path: if LIF, load + normalize here; elif use provided stack.
         if source_is_lif:
             if self._selected_lif is None:
@@ -547,7 +547,7 @@ class DeviceSegmentationApp:
             else:
                 raise ValueError(f"Unsupported LIF array shape: {arr.shape}")
 
-            self._last_stack = arr.astype(np.float32)
+            self.last_stack = arr.astype(np.float32)
             z_um, y_um, x_um = read_voxel_size_um(
                 self._selected_lif,
                 source_is_lif=True,
@@ -555,23 +555,23 @@ class DeviceSegmentationApp:
                 image_index=idx,
             )
             self.last_z_step_um = z_um
-            self._last_y_step_um = y_um
-            self._last_x_step_um = x_um
-            self._last_xy_step_um = np.nanmean([v for v in [x_um, y_um] if v is not None]) if (x_um is not None or y_um is not None) else None
+            self.last_y_step_um = y_um
+            self.last_x_step_um = x_um
+            self.last_xy_step_um = np.nanmean([v for v in [x_um, y_um] if v is not None]) if (x_um is not None or y_um is not None) else None
         else:
             arr = np.asarray(stack)
 
         ds = max(1, int(downsample))
-        self._last_focus_downsample = ds
+        self.last_focus_downsample = ds
 
         stack_score_full = np.mean(arr, axis=-1) if arr.ndim == 4 else arr
-        focus_full, zmap_full, _, _ = self._curved_plane_refocus(
+        focus_full, zmap_full, _, _ = self.curved_plane_refocus(
             stack_score_full,
             grid=int(n_sampling),
             patch=int(patch),
             mask=None,
         )
-        self._last_focus_zmap_full = np.asarray(zmap_full, dtype=np.int16) if zmap_full is not None else None
+        self.last_focus_zmap_full = np.asarray(zmap_full, dtype=np.int16) if zmap_full is not None else None
 
         if ds > 1:
             focus_out = focus_full[::ds, ::ds]
@@ -580,7 +580,7 @@ class DeviceSegmentationApp:
 
         return focus_out
 
-    def _refocus_stack_around_plane(self, stack: np.ndarray, zmap: np.ndarray):
+    def refocus_stack_around_plane(self, stack: np.ndarray, zmap: np.ndarray):
         if stack is None or zmap is None:
             return stack
 
@@ -607,10 +607,10 @@ class DeviceSegmentationApp:
         return out
 
     # -------- segmentation + geometry --------
-    def _is_color_image_2d(self, arr: np.ndarray) -> bool:
+    def is_color_image_2d(self, arr: np.ndarray) -> bool:
         return arr.ndim == 3 and arr.shape[-1] in (3, 4) and arr.shape[0] > 32 and arr.shape[1] > 32
 
-    def _scale_to_uint8_view(self, arr):
+    def scale_to_uint8_view(self, arr):
         if arr is None:
             return None
         data = np.asarray(arr)
@@ -621,7 +621,7 @@ class DeviceSegmentationApp:
         scaled = np.clip((data - dmin) / (dmax - dmin), 0.0, 1.0)
         return (scaled * 255.0).astype(np.uint8)
 
-    def _order_corners_clockwise(self, corners_xy: np.ndarray):
+    def order_corners_clockwise(self, corners_xy: np.ndarray):
         c = np.asarray(corners_xy, dtype=float)
         centroid = c.mean(axis=0)
         angles = np.arctan2(c[:, 1] - centroid[1], c[:, 0] - centroid[0])
@@ -629,10 +629,10 @@ class DeviceSegmentationApp:
         start = np.argmin(c[:, 0] + c[:, 1])
         return np.roll(c, -start, axis=0)
 
-    def _crop_rectified_from_corners(self, in_focus_plane: np.ndarray, corners_xy: np.ndarray):
+    def crop_rectified_from_corners(self, in_focus_plane: np.ndarray, corners_xy: np.ndarray):
         if corners_xy is None:
             return None
-        c = self._order_corners_clockwise(corners_xy)
+        c = self.order_corners_clockwise(corners_xy)
         w1 = np.hypot(c[1, 0] - c[0, 0], c[1, 1] - c[0, 1])
         w2 = np.hypot(c[2, 0] - c[3, 0], c[2, 1] - c[3, 1])
         h1 = np.hypot(c[3, 0] - c[0, 0], c[3, 1] - c[0, 1])
@@ -649,20 +649,20 @@ class DeviceSegmentationApp:
         warped = warp(in_focus_plane, tform, output_shape=(height, width), order=1, preserve_range=True)
         return warped.astype(in_focus_plane.dtype)
 
-    def _crop_rectified_stack_from_corners(self, stack: np.ndarray, corners_xy: np.ndarray):
-        # C3: delegate to the unified _crop_rectified method
-        return self._crop_rectified(stack, corners_xy)
+    def crop_rectified_stack_from_corners(self, stack: np.ndarray, corners_xy: np.ndarray):
+        # C3: delegate to the unified crop_rectified method
+        return self.crop_rectified(stack, corners_xy)
 
-    def _crop_rectified(self, data: np.ndarray, corners_xy: np.ndarray):
+    def crop_rectified(self, data: np.ndarray, corners_xy: np.ndarray):
         """C3: unified crop for 2-D planes, 3-D stacks, and 4-D stacks (z, h, w, c).
 
-        Replaces the separate _crop_rectified_stack_from_corners path; the 2-D
-        _crop_rectified_from_corners still handles the single-plane case directly
+        Replaces the separate crop_rectified_stack_from_corners path; the 2-D
+        crop_rectified_from_corners still handles the single-plane case directly
         for clarity.
         """
         if corners_xy is None or data is None:
             return None
-        c = self._order_corners_clockwise(corners_xy)
+        c = self.order_corners_clockwise(corners_xy)
         w1 = np.hypot(c[1, 0] - c[0, 0], c[1, 1] - c[0, 1])
         w2 = np.hypot(c[2, 0] - c[3, 0], c[2, 1] - c[3, 1])
         h1 = np.hypot(c[3, 0] - c[0, 0], c[3, 1] - c[0, 1])
@@ -697,19 +697,19 @@ class DeviceSegmentationApp:
 
         return warped.astype(data.dtype)
 
-    def _signed_orientation(self, region):
+    def signed_orientation(self, region):
         img = binary_fill_holes(region.image).astype(float)
         mu = moments_central(img)
         angle_rad = 0.5 * np.arctan2(2 * mu[1, 1], mu[2, 0] - mu[0, 2])
         return np.rad2deg(angle_rad)
 
-    def _corners_touch_border(self, corners_xy: np.ndarray, shape, margin=0):
+    def corners_touch_border(self, corners_xy: np.ndarray, shape, margin=0):
         H, W = shape
         x = corners_xy[:, 0]
         y = corners_xy[:, 1]
         return (x <= margin).any() or (x >= (W - 1 - margin)).any() or (y <= margin).any() or (y >= (H - 1 - margin)).any()
 
-    def _mask_out_organoid(self, in_focus_plane, mode: str = "dark"):
+    def mask_out_organoid(self, in_focus_plane, mode: str = "dark"):
         """Segment the central organoid region.
 
         Parameters
@@ -815,7 +815,7 @@ class DeviceSegmentationApp:
                     import multiprocessing as _mp_min, tempfile as _tf_min
                     _tmp_min = _tf_min.mktemp(suffix=".npy")
                     _proc_min = _mp_min.Process(
-                        target=_mp_run_threshold_minimum,
+                        target=mp_run_threshold_minimum,
                         args=(inverted, _tmp_min),
                     )
                     _proc_min.start()
@@ -862,7 +862,7 @@ class DeviceSegmentationApp:
         organoid_region = closing(organoid_region, disk(5))
         return organoid_region
 
-    def _oriented_rect_corners_crop_necks_and_flares(self, mask: np.ndarray):
+    def oriented_rect_corners_crop_necks_and_flares(self, mask: np.ndarray):
         ys, xs = np.nonzero(mask)
         if xs.size == 0:
             return None, None, None
@@ -965,12 +965,12 @@ class DeviceSegmentationApp:
         y = cy + s * corners_uv[:, 0] + c * corners_uv[:, 1]
         return np.stack([x, y], axis=1), angle_rad, centroid_xy
 
-    def _segment_from_plane(self, in_focus_plane: np.ndarray, mask_central_region, return_debug: bool):
+    def segment_from_plane(self, in_focus_plane: np.ndarray, mask_central_region, return_debug: bool):
         flag = False
         # Normalise legacy bool True → "dark" (original invert-based behaviour)
         if mask_central_region is True:
             mask_central_region = "dark"
-        in_focus_plane = self._to_gray(in_focus_plane)
+        in_focus_plane = self.to_gray(in_focus_plane)
 
         median_thresholded = median(np.asarray(in_focus_plane, dtype=np.float32), footprint=disk(7)).astype(np.float32)
         sobel_operated = sobel(median_thresholded).astype(np.float32)
@@ -983,7 +983,7 @@ class DeviceSegmentationApp:
         organoid_region = None
         if mask_central_region:
             try:
-                organoid_region = self._mask_out_organoid(in_focus_plane, mode=mask_central_region)
+                organoid_region = self.mask_out_organoid(in_focus_plane, mode=mask_central_region)
             except RuntimeError:
                 organoid_region = None
             if organoid_region is not None:
@@ -1005,7 +1005,7 @@ class DeviceSegmentationApp:
         pad = base_selem.shape[0] // 2
 
         for region in regionprops(labels_to_dilate):
-            angle_to_rotate = self._signed_orientation(region)
+            angle_to_rotate = self.signed_orientation(region)
             rotated_selem = rotate(base_selem.astype(float), angle=90 + angle_to_rotate, reshape=False, order=0) > 0.5
 
             minr, minc, maxr, maxc = region.bbox
@@ -1030,7 +1030,7 @@ class DeviceSegmentationApp:
         rescue_radius = None
         hough_attempts_log = []
 
-        corners, angle_rad, centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(device_mask)
+        corners, angle_rad, centroid_xy = self.oriented_rect_corners_crop_necks_and_flares(device_mask)
         # Check if device mask itself touches the image border (more reliable
         # than only checking the oriented-rectangle corners, which can be
         # pulled inward by neck/flare cropping).
@@ -1039,7 +1039,7 @@ class DeviceSegmentationApp:
             device_mask[0, :].any() or device_mask[-1, :].any() or
             device_mask[:, 0].any() or device_mask[:, -1].any()
         )
-        if corners is None or self._corners_touch_border(corners, device_mask.shape, margin=5) or mask_touches_border:
+        if corners is None or self.corners_touch_border(corners, device_mask.shape, margin=5) or mask_touches_border:
             flag = True
             if corners is None:
                 reason = "corners is None"
@@ -1070,9 +1070,9 @@ class DeviceSegmentationApp:
                     continue
                 best_c = max(non_border, key=lambda p: p.area)
                 rescue_mask = clab == best_c.label
-                rc, ra, rce = self._oriented_rect_corners_crop_necks_and_flares(rescue_mask)
+                rc, ra, rce = self.oriented_rect_corners_crop_necks_and_flares(rescue_mask)
                 area_fraction = best_c.area / (ch * cw)
-                if rc is not None and not self._corners_touch_border(rc, rescue_mask.shape, margin=5):
+                if rc is not None and not self.corners_touch_border(rc, rescue_mask.shape, margin=5):
                     if area_fraction < 0.40:
                         break
                     new_corners, new_angle_rad, new_centroid_xy = rc, ra, rce
@@ -1116,7 +1116,7 @@ class DeviceSegmentationApp:
                     props = regionprops(updated_clean_labels)
                     largest_prop = max(props, key=lambda p: p.area)
                     new_device_mask = updated_clean_labels == largest_prop.label
-                    new_corners, new_angle_rad, new_centroid_xy = self._oriented_rect_corners_crop_necks_and_flares(new_device_mask)
+                    new_corners, new_angle_rad, new_centroid_xy = self.oriented_rect_corners_crop_necks_and_flares(new_device_mask)
 
                     # Diagnostic checks for this attempt
                     h_dm, w_dm = new_device_mask.shape
@@ -1126,7 +1126,7 @@ class DeviceSegmentationApp:
                     )
                     corners_touch = (
                         new_corners is not None and
-                        self._corners_touch_border(new_corners, new_device_mask.shape, margin=5)
+                        self.corners_touch_border(new_corners, new_device_mask.shape, margin=5)
                     )
                     device_area_frac = float(new_device_mask.sum()) / (h_dm * w_dm)
                     n_regions = len(props)
@@ -1166,7 +1166,7 @@ class DeviceSegmentationApp:
             final_angle_rad = 0.0
             final_centroid_xy = np.array([w / 2.0, h / 2.0])
 
-        cropped_rotated = self._crop_rectified_from_corners(in_focus_plane, final_corners)
+        cropped_rotated = self.crop_rectified_from_corners(in_focus_plane, final_corners)
 
         if return_debug:
             debug = {
@@ -1199,7 +1199,7 @@ class DeviceSegmentationApp:
         return in_focus_plane, organoid_region, final_corners, cropped_rotated
 
     # -------- IO / GUI flow --------
-    def _list_images(self, image_source: Path):
+    def list_images(self, image_source: Path):
         p = Path(image_source)
         if not p.exists():
             self.images_output.value = "[WARN] Please select a folder, a .tif/.tiff file, or a .lif file."
@@ -1207,9 +1207,9 @@ class DeviceSegmentationApp:
 
         self._selected_image_folder = None
         self._selected_lif = None
-        self._image_paths = []
-        self._last_stack = None
-        self._last_focus_downsample = 1
+        self.image_paths = []
+        self.last_stack = None
+        self.last_focus_downsample = 1
         choices = []
         choice_map = {}
 
@@ -1218,21 +1218,21 @@ class DeviceSegmentationApp:
             image_files = sorted([q for q in p.iterdir() if q.is_file() and q.suffix.lower() in (".tif", ".tiff")])
             if not image_files:
                 self.images_output.value = "[WARN] No .tif/.tiff images found in the selected folder."
-                self._reset_image_choices()
-                self._update_segment_button()
+                self.reset_image_choices()
+                self.update_segment_button()
                 return
-            self._image_paths = image_files
+            self.image_paths = image_files
             for i, pth in enumerate(image_files):
                 label_txt = f"{i}: {pth.name}"
                 choices.append(label_txt)
                 choice_map[label_txt] = i
-            self._image_choice_map = choice_map
-            self.segment_and_view.image_choice.choices = choices
-            self.segment_and_view.image_choice.value = choices[0]
+            self.image_choice_map = choice_map
+            self.segment_and_view_widget.image_choice.choices = choices
+            self.segment_and_view_widget.image_choice.value = choices[0]
             z_um, y_um, x_um = read_voxel_size_um(image_files[0], source_is_lif=False)
             self._loaded_voxel_um = (z_um, y_um, x_um)
-            self.images_output.value = f"[OK] Found {len(choices)} images in folder. Select one and click Segment + View. {self._voxel_log_text(z_um, y_um, x_um)}"
-            self._update_segment_button()
+            self.images_output.value = f"[OK] Found {len(choices)} images in folder. Select one and click Segment + View. {self.voxel_log_text(z_um, y_um, x_um)}"
+            self.update_segment_button()
             return
 
         if p.suffix.lower() == ".lif":
@@ -1246,19 +1246,19 @@ class DeviceSegmentationApp:
                         choice_map[label_txt] = i
             except Exception:
                 self.images_output.value = "[ERROR] Unable to read .lif contents."
-                self._reset_image_choices()
-                self._update_segment_button()
+                self.reset_image_choices()
+                self.update_segment_button()
                 return
 
             if not choices:
                 self.images_output.value = "[WARN] No readable images found inside the selected .lif file."
-                self._reset_image_choices()
-                self._update_segment_button()
+                self.reset_image_choices()
+                self.update_segment_button()
                 return
 
-            self._image_choice_map = choice_map
-            self.segment_and_view.image_choice.choices = choices
-            self.segment_and_view.image_choice.value = choices[0]
+            self.image_choice_map = choice_map
+            self.segment_and_view_widget.image_choice.choices = choices
+            self.segment_and_view_widget.image_choice.value = choices[0]
             first_idx = choice_map[choices[0]]
             z_um, y_um, x_um = read_voxel_size_um(
                 self._selected_lif,
@@ -1267,27 +1267,27 @@ class DeviceSegmentationApp:
                 image_index=first_idx,
             )
             self._loaded_voxel_um = (z_um, y_um, x_um)
-            self.images_output.value = f"[OK] Found {len(choices)} images in .lif. Select one and click Segment + View. {self._voxel_log_text(z_um, y_um, x_um)}"
-            self._update_segment_button()
+            self.images_output.value = f"[OK] Found {len(choices)} images in .lif. Select one and click Segment + View. {self.voxel_log_text(z_um, y_um, x_um)}"
+            self.update_segment_button()
             return
 
         if p.suffix.lower() in (".tif", ".tiff"):
-            self._image_paths = [p]
+            self.image_paths = [p]
             label_txt = f"0: {p.name}"
-            self._image_choice_map = {label_txt: 0}
-            self.segment_and_view.image_choice.choices = [label_txt]
-            self.segment_and_view.image_choice.value = label_txt
+            self.image_choice_map = {label_txt: 0}
+            self.segment_and_view_widget.image_choice.choices = [label_txt]
+            self.segment_and_view_widget.image_choice.value = label_txt
             z_um, y_um, x_um = read_voxel_size_um(p, source_is_lif=False)
             self._loaded_voxel_um = (z_um, y_um, x_um)
-            self.images_output.value = f"[OK] Loaded single .tif file. Select it and click Segment + View. {self._voxel_log_text(z_um, y_um, x_um)}"
-            self._update_segment_button()
+            self.images_output.value = f"[OK] Loaded single .tif file. Select it and click Segment + View. {self.voxel_log_text(z_um, y_um, x_um)}"
+            self.update_segment_button()
             return
 
         self.images_output.value = "[WARN] Unsupported selection. Choose a folder, a .tif/.tiff file, or a .lif file."
-        self._reset_image_choices()
-        self._update_segment_button()
+        self.reset_image_choices()
+        self.update_segment_button()
 
-    def _segment_and_view(
+    def segment_and_view(
         self,
         image_choice: str,
         focus_downsample: int,
@@ -1298,14 +1298,14 @@ class DeviceSegmentationApp:
     ):
         source_is_lif = bool(getattr(self, "_selected_lif", None) and self._selected_lif.exists())
 
-        if not source_is_lif and not self._image_paths:
+        if not source_is_lif and not self.image_paths:
             self.images_output.value = "[WARN] Select a folder/.tif/.lif and click 'Load images' first."
             return
-        if not self._image_choice_map:
+        if not self.image_choice_map:
             self.images_output.value = "[WARN] Click 'Load images' to populate the dropdown."
             return
 
-        image_index = self._image_choice_map.get(image_choice)
+        image_index = self.image_choice_map.get(image_choice)
         if image_index is None:
             self.images_output.value = "[WARN] Please select an image from the dropdown."
             return
@@ -1315,12 +1315,12 @@ class DeviceSegmentationApp:
             label = label.split(":", 1)[1].strip()
         self.image_name = Path(label).stem
 
-        self._last_focus_n_sampling = int(focus_n_sampling)
-        self._last_focus_patch = int(focus_patch)
+        self.last_focus_n_sampling = int(focus_n_sampling)
+        self.last_focus_patch = int(focus_patch)
 
         try:
             if source_is_lif:
-                in_focus_plane = self._compute_focus_plane_from_stack(
+                in_focus_plane = self.compute_focus_plane_from_stack(
                     stack=None,
                     downsample=focus_downsample,
                     n_sampling=focus_n_sampling,
@@ -1328,13 +1328,13 @@ class DeviceSegmentationApp:
                     source_is_lif=True,
                     image_index=image_index,
                 )
-                in_focus_plane, organoid_region, final_corners, _, debug = self._segment_from_plane(
+                in_focus_plane, organoid_region, final_corners, _, debug = self.segment_from_plane(
                     in_focus_plane,
                     mask_central_region,
                     return_debug=True,
                 )
             else:
-                source_path = self._image_paths[image_index]
+                source_path = self.image_paths[image_index]
                 arr = np.asarray(tifffile.imread(str(source_path)))
 
                 # Multi-channel TIFF: extract the requested channel to get a 3-D stack
@@ -1346,19 +1346,19 @@ class DeviceSegmentationApp:
                     arr = np.take(arr, ch_idx, axis=ch_axis)
 
                 z_um, y_um, x_um = read_voxel_size_um(Path(source_path), source_is_lif=False)
-                self._set_last_voxel_steps(z_um, y_um, x_um)
+                self.set_last_voxel_steps(z_um, y_um, x_um)
 
-                if self._is_color_image_2d(arr) or arr.ndim < 3:
+                if self.is_color_image_2d(arr) or arr.ndim < 3:
                     in_focus_plane = arr.astype(np.float32)
-                    self._last_stack = None
-                    self._last_focus_downsample = 1
+                    self.last_stack = None
+                    self.last_focus_downsample = 1
                 else:
                     stack = arr.astype(np.float32)
-                    in_focus_plane = self._compute_focus_plane_from_stack(stack, focus_downsample, focus_n_sampling, focus_patch)
-                    self._last_stack = stack
-                    self._last_focus_downsample = max(1, int(focus_downsample))
+                    in_focus_plane = self.compute_focus_plane_from_stack(stack, focus_downsample, focus_n_sampling, focus_patch)
+                    self.last_stack = stack
+                    self.last_focus_downsample = max(1, int(focus_downsample))
 
-                in_focus_plane, organoid_region, final_corners, _, debug = self._segment_from_plane(
+                in_focus_plane, organoid_region, final_corners, _, debug = self.segment_from_plane(
                     in_focus_plane,
                     mask_central_region,
                     return_debug=True,
@@ -1397,22 +1397,22 @@ class DeviceSegmentationApp:
         self.device_width_ok.device_width_um.value = 30.0
 
 
-        self._add_layer_if_nonzero(in_focus_plane, name="original", layer_type="image")
+        self.add_layer_if_nonzero(in_focus_plane, name="original", layer_type="image")
 
         if mask_central_region and organoid_region is not None:
-            organoid_layer = self._add_layer_if_nonzero(organoid_region.astype(np.uint8), name="organoid_region", layer_type="labels")
+            organoid_layer = self.add_layer_if_nonzero(organoid_region.astype(np.uint8), name="organoid_region", layer_type="labels")
             if organoid_layer is not None:
                 organoid_layer.opacity = 0.4
 
         force_roi = clear_layers or self._roi_layer is None or len(getattr(self._roi_layer, "data", [])) == 0
-        self._set_roi_layer(final_corners, force=force_roi)
-        self._update_outer_geometry_from_current_roi(self.device_width_ok.device_width_um.value, update_message=False)
+        self.set_roi_layer(final_corners, force=force_roi)
+        self.update_outer_geometry_from_current_roi(self.device_width_ok.device_width_um.value, update_message=False)
         self.images_output.value = (
             "[OK] Segmentation complete. Outer geometry is shown at default Device width=30 um; adjust width as needed."
         )
 
 
-    def _set_roi_layer(self, corners_xy, force=False):
+    def set_roi_layer(self, corners_xy, force=False):
         if corners_xy is None:
             self.images_output.value = "[WARN] No corners found for ROI."
             return
@@ -1420,7 +1420,7 @@ class DeviceSegmentationApp:
         if self._roi_layer is None or self._roi_layer not in self.viewer.layers:
             self._roi_layer = self.viewer.add_shapes(name="geometry")
             try:
-                self._roi_layer.events.data.connect(self._on_roi_layer_data_changed)
+                self._roi_layer.events.data.connect(self.on_roi_layer_data_changed)
             except Exception:
                 pass
         if force or len(self._roi_layer.data) == 0:
@@ -1431,7 +1431,7 @@ class DeviceSegmentationApp:
         self._roi_layer.editable = True
         self._roi_layer.mode = "select"
 
-    def _on_roi_layer_data_changed(self, event=None):
+    def on_roi_layer_data_changed(self, event=None):
         if self._syncing_outer_geometry:
             return
         if self._roi_outer_layer is None or self._roi_outer_layer not in self.viewer.layers:
@@ -1449,18 +1449,18 @@ class DeviceSegmentationApp:
 
         try:
             self._syncing_outer_geometry = True
-            self._update_outer_geometry_from_current_roi(width_um, update_message=False)
+            self.update_outer_geometry_from_current_roi(width_um, update_message=False)
         finally:
             self._syncing_outer_geometry = False
 
-    def _get_current_roi_corners_xy(self):
+    def get_current_roi_corners_xy(self):
         if self._roi_layer is None or len(self._roi_layer.data) == 0:
             return None
         corners_xy = np.asarray(self._roi_layer.data[0])[:, ::-1]
-        return self._order_corners_clockwise(corners_xy)
+        return self.order_corners_clockwise(corners_xy)
 
-    def _expand_rectangle_corners(self, corners_xy: np.ndarray, expand_x_px: float, expand_y_px: float):
-        c = self._order_corners_clockwise(corners_xy)
+    def expand_rectangle_corners(self, corners_xy: np.ndarray, expand_x_px: float, expand_y_px: float):
+        c = self.order_corners_clockwise(corners_xy)
         center = c.mean(axis=0)
 
         e0 = c[1] - c[0]
@@ -1486,14 +1486,14 @@ class DeviceSegmentationApp:
         )
         return expanded
 
-    def _update_outer_geometry_from_current_roi(self, device_width_um: float, update_message: bool = True):
-        corners_xy = self._get_current_roi_corners_xy()
+    def update_outer_geometry_from_current_roi(self, device_width_um: float, update_message: bool = True):
+        corners_xy = self.get_current_roi_corners_xy()
         if corners_xy is None:
             if update_message:
                 self.images_output.value = "[WARN] Geometry layer is missing. Run 'Segment + View' again."
             return False
 
-        px_xy = um_to_xy_pixels(device_width_um, self._last_x_step_um, self._last_y_step_um)
+        px_xy = um_to_xy_pixels(device_width_um, self.last_x_step_um, self.last_y_step_um)
         if px_xy is None:
             if update_message:
                 self.images_output.value = (
@@ -1502,7 +1502,7 @@ class DeviceSegmentationApp:
             return False
 
         expand_x_px, expand_y_px = px_xy
-        expanded_xy = self._expand_rectangle_corners(corners_xy, expand_x_px, expand_y_px)
+        expanded_xy = self.expand_rectangle_corners(corners_xy, expand_x_px, expand_y_px)
         if expanded_xy is None:
             if update_message:
                 self.images_output.value = "[WARN] Could not compute expanded geometry."
@@ -1525,8 +1525,8 @@ class DeviceSegmentationApp:
             )
         return True
 
-    def _apply_device_width_layer(self, device_width_um: float):
-        corners_xy = self._get_current_roi_corners_xy()
+    def apply_device_width_layer(self, device_width_um: float):
+        corners_xy = self.get_current_roi_corners_xy()
         if corners_xy is None:
             self.images_output.value = "[WARN] Draw or adjust rectangle first."
             return
@@ -1537,9 +1537,9 @@ class DeviceSegmentationApp:
             self.images_output.value = "[WARN] Device width must be numeric."
             return
 
-        self._update_outer_geometry_from_current_roi(self._active_device_width_um, update_message=True)
+        self.update_outer_geometry_from_current_roi(self._active_device_width_um, update_message=True)
 
-    def _compute_focus_patch_votes_for_stack(self, stack: np.ndarray, n_sampling: int, patch: int):
+    def compute_focus_patch_votes_for_stack(self, stack: np.ndarray, n_sampling: int, patch: int):
         if stack is None:
             return None
 
@@ -1558,7 +1558,7 @@ class DeviceSegmentationApp:
         half = patch // 2
 
         if H <= patch or W <= patch:
-            scores = [np.std(sobel(self._to_gray(stack_gray[z]))) for z in range(Z)]
+            scores = [np.std(sobel(self.to_gray(stack_gray[z]))) for z in range(Z)]
             z_best = int(np.argmax(scores))
             counts = np.zeros(Z, dtype=np.int32)
             counts[z_best] = 1
@@ -1574,19 +1574,19 @@ class DeviceSegmentationApp:
                 y1 = min(H, y + half)
                 x0 = max(0, x - half)
                 x1 = min(W, x + half)
-                f = np.array([self._focus_score(stack_gray[z, y0:y1, x0:x1]) for z in range(Z)], dtype=np.float32)
+                f = np.array([self.focus_score(stack_gray[z, y0:y1, x0:x1]) for z in range(Z)], dtype=np.float32)
                 best_z = int(np.argmax(f))
                 counts[best_z] += 1
         return counts
 
-    def _apply_crop_from_roi(self):
+    def apply_crop_from_roi(self):
         corners_xy = None
         if self._roi_outer_layer is not None and self._roi_outer_layer in self.viewer.layers:
             if len(getattr(self._roi_outer_layer, "data", [])) > 0:
                 outer_xy = np.asarray(self._roi_outer_layer.data[0])[:, ::-1]
-                corners_xy = self._order_corners_clockwise(outer_xy)
+                corners_xy = self.order_corners_clockwise(outer_xy)
         if corners_xy is None:
-            corners_xy = self._get_current_roi_corners_xy()
+            corners_xy = self.get_current_roi_corners_xy()
         if corners_xy is None:
             self.images_output.value = "[WARN] Draw or adjust geometry first."
             return
@@ -1594,23 +1594,23 @@ class DeviceSegmentationApp:
             self.images_output.value = "[WARN] Run 'Segment + View' first."
             return
 
-        if self._last_stack is not None:
-            scale = max(1, int(self._last_focus_downsample))
-            stack_for_crop = self._last_stack
-            if self._last_focus_zmap_full is not None:
-                refocused = self._refocus_stack_around_plane(self._last_stack, self._last_focus_zmap_full)
+        if self.last_stack is not None:
+            scale = max(1, int(self.last_focus_downsample))
+            stack_for_crop = self.last_stack
+            if self.last_focus_zmap_full is not None:
+                refocused = self.refocus_stack_around_plane(self.last_stack, self.last_focus_zmap_full)
                 if refocused is not None:
                     stack_for_crop = refocused
 
-            cropped_stack = self._crop_rectified_stack_from_corners(stack_for_crop, corners_xy * float(scale))
+            cropped_stack = self.crop_rectified_stack_from_corners(stack_for_crop, corners_xy * float(scale))
             if cropped_stack is None:
                 self.images_output.value = "[WARN] Crop failed for selected geometry (stack)."
                 return
 
-            roi_inner_xy = self._get_current_roi_corners_xy()
+            roi_inner_xy = self.get_current_roi_corners_xy()
             roi_stack_only = None
             if roi_inner_xy is not None:
-                roi_stack_only = self._crop_rectified_stack_from_corners(stack_for_crop, roi_inner_xy * float(scale))
+                roi_stack_only = self.crop_rectified_stack_from_corners(stack_for_crop, roi_inner_xy * float(scale))
             self._last_geometry_vote_counts = None
 
             self._cropped_stack_xy_raw = cropped_stack
@@ -1618,21 +1618,21 @@ class DeviceSegmentationApp:
             self.cropped_xyz = None
             self._cropped_organoid_mask_xy_raw = None
 
-            cropped_view = self._scale_to_uint8_view(cropped_stack)
+            cropped_view = self.scale_to_uint8_view(cropped_stack)
             if self._cropped_layer is not None and self._cropped_layer in self.viewer.layers:
                 self._cropped_layer.data = cropped_view
             else:
-                self._cropped_layer = self._add_layer_if_nonzero(
+                self._cropped_layer = self.add_layer_if_nonzero(
                     cropped_view,
                     name="cropped_rotated",
                     layer_type="image",
                 )
             counts = None
             if roi_stack_only is not None:
-                counts = self._compute_focus_patch_votes_for_stack(
+                counts = self.compute_focus_patch_votes_for_stack(
                     roi_stack_only.astype(np.float32),
-                    n_sampling=int(self._last_focus_n_sampling or 10),
-                    patch=int(self._last_focus_patch or 50),
+                    n_sampling=int(self.last_focus_n_sampling or 10),
+                    patch=int(self.last_focus_patch or 50),
                 )
 
             self._cropped_stack_z_raw = self._cropped_stack_xy_raw
@@ -1652,7 +1652,7 @@ class DeviceSegmentationApp:
                     organoid_mask = np.pad(organoid_mask, ((0, 0), (0, pad_w)), mode="constant", constant_values=False)
                 organoid_mask = organoid_mask[:target_h, :target_w]
 
-                cropped_organoid = self._crop_rectified_from_corners(
+                cropped_organoid = self.crop_rectified_from_corners(
                     organoid_mask.astype(np.float32),
                     corners_xy * float(scale),
                 )
@@ -1664,7 +1664,7 @@ class DeviceSegmentationApp:
             self.images_output.value = "[OK] Cropped aligned stack created from current geometry."
             return
 
-        cropped_img = self._crop_rectified_from_corners(self.last_image, corners_xy)
+        cropped_img = self.crop_rectified_from_corners(self.last_image, corners_xy)
         if cropped_img is None:
             self.images_output.value = "[WARN] Crop failed for selected geometry."
             return
@@ -1675,12 +1675,12 @@ class DeviceSegmentationApp:
         z_um, y_um, x_um = self._loaded_voxel_um
         if self.last_z_step_um is not None:
             z_um = self.last_z_step_um
-        if self._last_y_step_um is not None:
-            y_um = self._last_y_step_um
-        if self._last_x_step_um is not None:
-            x_um = self._last_x_step_um
+        if self.last_y_step_um is not None:
+            y_um = self.last_y_step_um
+        if self.last_x_step_um is not None:
+            x_um = self.last_x_step_um
 
-        xy_um = self._last_xy_step_um
+        xy_um = self.last_xy_step_um
         if xy_um is None and (x_um is not None or y_um is not None):
             xy_um = float(np.nanmean([v for v in [x_um, y_um] if v is not None]))
 
@@ -1707,12 +1707,12 @@ class DeviceSegmentationApp:
         )
 
     # -------- viewer helpers --------
-    def _add_layer_if_nonzero(self, data, name, layer_type="image", **kwargs):
+    def add_layer_if_nonzero(self, data, name, layer_type="image", **kwargs):
         if data is None or not np.any(data):
             return None
         if layer_type == "labels":
             return self.viewer.add_labels(data, name=name, **kwargs)
         return self.viewer.add_image(data, name=name, **kwargs)
 
-    def _update_segment_button(self, *_):
-        self.segment_and_view.call_button.enabled = True
+    def update_segment_button(self, *_):
+        self.segment_and_view_widget.call_button.enabled = True

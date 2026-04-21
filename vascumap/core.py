@@ -380,7 +380,7 @@ class VascuMap:
         )
         print(self.analysis_results['global_metrics_df'].to_string(index=False))
 
-    def _write_debug_txt(self, out: Path, name_prefix: str, error_category: str, body_lines: list) -> None:
+    def write_debug_txt(self, out: Path, name_prefix: str, error_category: str, body_lines: list) -> None:
         """Write the unified per-image failure note. Only called on failure."""
         src = Path(self.image_source_path) if self.image_source_path else None
         # Stack height in um from cropped_stack (2 um iso post-preprocess if available)
@@ -435,7 +435,7 @@ class VascuMap:
             if organoid_mask.size > 0:
                 organoid_fraction = np.count_nonzero(organoid_mask) / organoid_mask.size
                 if organoid_fraction > 0.40:
-                    self._write_debug_txt(out, name_prefix, "organoid_too_large", [
+                    self.write_debug_txt(out, name_prefix, "organoid_too_large", [
                         f"Organoid covers {organoid_fraction:.1%} of the image (>40% threshold).",
                         "Device segmentation outputs saved; downstream stages skipped.",
                     ])
@@ -446,7 +446,7 @@ class VascuMap:
         t0 = time.perf_counter()
         result = self.preprocess()
         if result is None and self.cropped_stack is None:
-            self._write_debug_txt(out, name_prefix, "no_valid_z_range", [
+            self.write_debug_txt(out, name_prefix, "no_valid_z_range", [
                 "preprocess() found no valid z-range / cropped stack.",
             ])
             print(f"  ⚠ Skipping {name_prefix}: no valid z-range / cropped stack.")
@@ -463,7 +463,7 @@ class VascuMap:
         print(f"  Postprocess: {time.perf_counter() - t0:.1f} s")
 
         if self.z_start_final is None:
-            self._write_debug_txt(out, name_prefix, "no_strong_vote_planes", [
+            self.write_debug_txt(out, name_prefix, "no_strong_vote_planes", [
                 "postprocess() found no strong contiguous vote planes.",
             ])
             print(f"  ⚠ Skipping {name_prefix}: postprocess found no strong vote planes.")
@@ -491,7 +491,7 @@ class VascuMap:
                 "  - The device region was not cropped tightly enough.",
                 "  - The z-range selection included out-of-focus planes.",
             ])
-            self._write_debug_txt(out, name_prefix, "all_slices_trimmed", body)
+            self.write_debug_txt(out, name_prefix, "all_slices_trimmed", body)
             print(f"  ⚠ Skipping {name_prefix}: all z-slices trimmed (too much vasculature).")
 
             # Save interim outputs even on trim failure so the user can

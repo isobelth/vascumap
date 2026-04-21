@@ -29,6 +29,7 @@ from matplotlib.colors import Normalize
 # ---------------------------------------------------------------------------
 
 def safe_divide(numerator, denominator):
+    """Divide numerator by denominator, returning NaN if denominator is zero or negative."""
     denominator = float(denominator)
     if denominator <= 0:
         return np.nan
@@ -36,6 +37,7 @@ def safe_divide(numerator, denominator):
 
 
 def safe_median(values):
+    """Compute the median of values, returning NaN if no finite values are available."""
     arr = np.asarray(pd.to_numeric(values, errors='coerce'), dtype=float).ravel()
     arr = arr[~np.isnan(arr)]
     if arr.size == 0:
@@ -44,6 +46,7 @@ def safe_median(values):
 
 
 def safe_percentile_spread(values, low=10, high=90):
+    """Return the spread between the low and high percentiles of values."""
     arr = np.asarray(pd.to_numeric(values, errors='coerce'), dtype=float).ravel()
     arr = arr[~np.isnan(arr)]
     if arr.size == 0:
@@ -77,12 +80,14 @@ def trim_segmentation(segmentation, fill_threshold=0.75):
 # ---------------------------------------------------------------------------
 
 def measure_edge_length(coordinates):
+    """Sum the Euclidean lengths of polyline segments defined by coordinates."""
     differences = np.diff(coordinates, axis=0)
     segment_lengths = np.linalg.norm(differences, axis=1)
     return np.sum(segment_lengths)
 
 
 def prune_graph(graph, area_3d, edt_cutoff=0.25, length_cutoff=25):
+    """Iteratively remove short or thin terminal branches from the vessel graph."""
     while True:
         endpoint_nodes = [node for node, degree in graph.degree() if degree == 1]
         values = []
@@ -116,6 +121,7 @@ def prune_graph(graph, area_3d, edt_cutoff=0.25, length_cutoff=25):
 
 
 def remove_mid_node(graph):
+    """Remove degree-2 nodes by merging their two edges into one."""
     while True:
         nodes_to_process = [n for n, d in graph.degree() if d == 2]
         if not nodes_to_process:
@@ -166,6 +172,7 @@ def remove_mid_node(graph):
 
 
 def collect_border_vicinity_edges(graph, image_shape, vicinity_xy=50, inplace=False):
+    """Remove graph edges that pass within vicinity_xy pixels of the image XY border."""
     border_vicinity_edges = set()
     for u, v in graph.edges():
         try:
@@ -214,6 +221,7 @@ def collect_exclusion_zone_edges(graph, exclusion_mask_xy, inplace=False):
 
 
 def compute_cross_sectional_areas(mask, skeleton, binary_edt, voxel_size_um=(2.0, 2.0, 2.0)):
+    """Compute per-skeleton-voxel cross-sectional areas from EDT and 2D EDT."""
     voxel_size_um = np.asarray(voxel_size_um, dtype=float)
     edt_2d = edt(np.max(mask, axis=0), sampling=tuple(voxel_size_um[1:]))
     area_3d = np.zeros_like(binary_edt, dtype=float)
@@ -228,6 +236,7 @@ def compute_cross_sectional_areas(mask, skeleton, binary_edt, voxel_size_um=(2.0
 
 
 def fractal_dimension_and_lacunarity(binary, min_box_size=1, max_box_size=None, n_samples=12):
+    """Estimate fractal dimension and lacunarity of a binary volume via box-counting."""
     pts = np.argwhere(binary > 0)
     if pts.size == 0:
         return np.nan, np.nan
@@ -265,6 +274,7 @@ def fractal_dimension_and_lacunarity(binary, min_box_size=1, max_box_size=None, 
 
 
 def graph2image(graph, shape):
+    """Rasterise graph edges back into a binary 3D volume of the given shape."""
     pruned_skeleton = np.zeros(shape)
     for u, v in graph.edges():
         coords = graph.get_edge_data(u, v)['pts']
@@ -279,7 +289,7 @@ def graph2image(graph, shape):
     return pruned_skeleton
 
 
-def _orientation_to_device_axis_deg(pts_um, device_axis='x'):
+def orientation_to_device_axis_deg(pts_um, device_axis='x'):
     """Return acute branch orientation angle (deg) relative to device axis in XY plane.
 
     The device segmentation step rectifies/crops to the device frame, so the
@@ -365,7 +375,7 @@ def compute_branch_metrics_df(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), 
                 'mean_width_um': mean_width_um,
                 'median_width_um': median_width_um,
                 'branch_volume_um3': branch_volume_um3,
-                'orientation_to_device_axis_deg': _orientation_to_device_axis_deg(pts_um, device_axis=device_axis),
+                'orientation_to_device_axis_deg': orientation_to_device_axis_deg(pts_um, device_axis=device_axis),
             }
             rows.append(row)
         except (KeyError, IndexError, ValueError):
@@ -547,6 +557,7 @@ def compute_all_morphological_params(global_metrics, branch_metrics_df, junction
 # ---------------------------------------------------------------------------
 
 def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), distance_mode='skeleton'):
+    """Aggregate per-branch metrics into network-level headline statistics."""
     voxel_size_um = np.asarray(voxel_size_um, dtype=float)
     summary = {
         'median_sprout_and_branch_orientation_deg': np.nan,
@@ -570,7 +581,7 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
             if len(pts) < 2:
                 continue
             pts_um = np.asarray(pts, dtype=float) * voxel_size_um[None, :]
-            orientations_deg.append(_orientation_to_device_axis_deg(pts_um, device_axis='x'))
+            orientations_deg.append(orientation_to_device_axis_deg(pts_um, device_axis='x'))
 
             segment_areas = area_image[pts[:, 0], pts[:, 1], pts[:, 2]]
             median_cs_areas.append(float(np.nanmedian(segment_areas)))
@@ -879,7 +890,7 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
         for u, v in g.edges():
             try:
                 pts = g[u][v]['pts'].astype(float)
-                orientations.append(_orientation_to_device_axis_deg(pts))
+                orientations.append(orientation_to_device_axis_deg(pts))
             except (KeyError, IndexError):
                 orientations.append(np.nan)
         return orientations
