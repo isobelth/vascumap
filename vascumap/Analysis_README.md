@@ -5,7 +5,7 @@ VascuMap outputs three CSV files for each image processed:
 | File | Row granularity | Number of columns | Intended use |
 |---|---|---|---|
 | `{name_prefix}_analysis_metrics.csv` | One row per image | ID columns + **19 curated features** | The recommended panel for use in the lab. This CSV contains a subset of biologically interpretable, shape-invariant descriptors. |
-| `{name_prefix}_all_morphological_params.csv` | One row per image | ID columns + **all** computed morphological metrics (~120) | Contains every global metric the pipeline computes, including disaggregated mean/std/median statistics split by branch vs sprout vs combined, and per-junction-type connectivity stats. Useful to have on file for future analyses, or useful for future GNN embedding. |
+| `{name_prefix}_all_morphological_params.csv` | One row per image | ID columns + **all** computed morphological metrics (~180) | Contains every global metric the pipeline computes, including disaggregated mean / std / median / p90\u2212p10 statistics split by branch vs sprout vs combined, and per-junction-type connectivity stats. Useful to have on file for future analyses, or useful for future GNN embedding. |
 | `{name_prefix}_branch_metrics.csv` | One row per skeleton **edge** (vessel segment) | ~25 columns including `node_start`/`node_end` integer IDs | The **graph table**: each row is one branch/sprout in the cleaned vessel graph, with its endpoint coordinates, length, calibre, tortuosity and orientation. Suitable as edge features for a future **graph neural network embedding**, or for plotting per-branch distributions. Probably not useful for individual lab users! |
 
 The first three columns of every CSV are identical and identify the image:
@@ -98,19 +98,25 @@ There are 19 features in `*_analysis_metrics.csv`. They were chosen to be:
 
 Sprouts (degree-1 tips) are excluded from these statistics because their
 endpoint distance is dominated by where the skeletonisation algorithm chose
-to terminate the tip, which makes their tortuosity less biologically
-meaningful than that of fully-formed connecting branches.
+to terminate the tip — a sprout's free end is wherever distance-transform
+pruning happened to stop, not a biologically meaningful landmark. The ratio
+$L_{path}/L_{endpoints}$ is therefore controlled by an algorithmic choice
+rather than vessel curvature, so we restrict tortuosity statistics to
+fully-formed connecting branches whose two endpoints are both real
+junctions. (Sprout *length* is reported separately below: a sprout's
+centerline length is itself the biologically meaningful quantity, and has no
+problematic denominator, so it is kept.)
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
 | `median_branch_tortuosity` | Median of $\tau = L_{path}/L_{endpoints}$ across non-sprout edges; $\tau$ clipped to $[1, 50]$ | The **typical curviness of a vessel**. $\tau = 1$ means perfectly straight; $\tau > 1$ means winding. | Ratio of two lengths; dimensionless. |
-| `std_branch_tortuosity` | Standard deviation of $\tau$ across non-sprout edges | How variable the curviness is across branches. | Standard deviation of a dimensionless quantity. |
+| `p90_minus_p10_branch_tortuosity` | $P90(\tau) - P10(\tau)$ across non-sprout edges | How heterogeneous the curviness is across branches — a small spread means uniformly straight (or uniformly winding) vessels, a large spread means a mix of straight and tortuous vessels coexist. We use a percentile spread rather than the standard deviation here so that the small number of clipped-at-50 outliers (see *Tortuosity clipping*, below) cannot dominate the statistic. | Difference of two percentiles of a dimensionless quantity. |
 
 #### Sprouting — sprouts only (1 feature)
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
-| `median_sprout_length_um` | Median of $L_{path}$ across sprout edges ($\mu m$) | The **typical length a sprout extends** before terminating.  | Intrinsic length of one anatomical unit. |
+| `median_sprout_length_um` | Median of $L_{path}$ across sprout edges ($\mu m$) | The **typical length a sprout extends** before terminating. Unlike sprout *tortuosity*, this quantity does not depend on where the algorithm chose to terminate the tip in a problematic way: $L_{path}$ is just the centerline length, so its value is a real biological readout of how far the sprout has grown. | Intrinsic length of one anatomical unit. |
 
 #### Junction connectivity (2 features)
 
@@ -210,18 +216,24 @@ the pipeline computes. It includes:
    `volume_um3`, `length_um`, `endpoint_distance_um`, `tortuosity`,
    `mean_cs_area_um2`, `median_cs_area_um2`, `std_cs_area_um2`,
    `mean_width_um`, `median_width_um`, `orientation_deg`, the file contains
-   `mean_*`, `std_*`, and `median_*` aggregated over (a) **branch-only**
-   edges (`*_branch_*`), (b) **sprout-only** edges (`*_sprout_*`), and
-   (c) **all edges combined** (`*_sprout_and_branch_*`). For example:
-   `mean_branch_length_um`, `std_sprout_tortuosity`,
-   `median_sprout_and_branch_mean_width_um`, etc.
+   `mean_*`, `std_*`, `median_*`, and `p90_minus_p10_*` aggregated over
+   (a) **branch-only** edges (`*_branch_*`), (b) **sprout-only** edges
+   (`*_sprout_*`), and (c) **all edges combined**
+   (`*_sprout_and_branch_*`). For example: `mean_branch_length_um`,
+   `std_sprout_tortuosity`, `median_sprout_and_branch_mean_width_um`,
+   `p90_minus_p10_branch_tortuosity`, etc. The `p90_minus_p10_*` family is
+   an outlier-robust measure of spread (the difference between the 90th and
+   10th percentile) and is preferred over `std_*` whenever the underlying
+   distribution has heavy tails or hard-clipped values.
 4. **Disaggregated junction statistics**: for each of the per-junction metrics
    `degree`, `dist_nearest_junction_um`, `dist_nearest_endpoint_um`,
    `num_junction_neighbors`, `num_endpoint_neighbors`, the file contains
-   `mean_*`, `std_*`, and `median_*` aggregated over (a) **junction nodes**
-   (`*_junction_*`), (b) **sprout-tip nodes** (`*_sprout_tip_*`), and
-   (c) **all nodes combined** (`*_all_nodes_*`). For example:
-   `mean_junction_degree`, `std_sprout_tip_dist_nearest_endpoint_um`.
+   `mean_*`, `std_*`, `median_*`, and `p90_minus_p10_*` aggregated over
+   (a) **junction nodes** (`*_junction_*`), (b) **sprout-tip nodes**
+   (`*_sprout_tip_*`), and (c) **all nodes combined** (`*_all_nodes_*`).
+   For example: `mean_junction_degree`,
+   `std_sprout_tip_dist_nearest_endpoint_um`,
+   `p90_minus_p10_all_nodes_degree`.
 
 ### Headline global-metric dictionary
 
@@ -263,14 +275,18 @@ The columns below are emitted directly by the pipeline (they are the
 | `total_number_of_edges` | count | Total number of edges in the cleaned graph. | Raw edge count. **Excluded.** |
 | `total_number_of_nodes` | count | Total number of nodes in the cleaned graph. | Raw node count. **Excluded.** |
 
-The disaggregated `mean_*` / `std_*` / `median_*` × `branch` / `sprout` /
-`sprout_and_branch` × geometry-column families (and the corresponding
-junction-side families) follow a consistent naming pattern, so any column
-not listed above can be decoded by reading its name left-to-right:
+The disaggregated `mean_*` / `std_*` / `median_*` / `p90_minus_p10_*` ×
+`branch` / `sprout` / `sprout_and_branch` × geometry-column families (and
+the corresponding junction-side families) follow a consistent naming
+pattern, so any column not listed above can be decoded by reading its name
+left-to-right. The `<aggregate>` token is one of `mean`, `std`, `median`,
+or `p90_minus_p10` (the difference between the 90th and 10th percentile,
+i.e. an outlier-robust spread measure).
 
 > `<aggregate>_<edge subset>_<per-branch column>` → e.g.
 > `std_branch_mean_width_um` is the *standard deviation* of *non-sprout edge*
-> *mean equivalent widths*.
+> *mean equivalent widths*; `p90_minus_p10_sprout_and_branch_length_um` is
+> the *P90 − P10 spread* of *all-edge centerline lengths*.
 
 > `<aggregate>_<node subset>_<per-junction column>` → e.g.
 > `mean_sprout_tip_dist_nearest_junction_um` is the *mean* over *sprout-tip
@@ -279,6 +295,35 @@ not listed above can be decoded by reading its name left-to-right:
 ---
 
 ## Mathematical caveats and visual intuition
+
+### Tortuosity definition and clipping
+
+For every edge in the cleaned graph the pipeline computes
+
+$$\tau = \frac{L_{path}}{L_{endpoints} + \varepsilon}, \qquad \tau \leftarrow \mathrm{clip}(\tau,\, 1,\, 50)$$
+
+where $L_{path}$ is the integrated centerline arc-length, $L_{endpoints}$ is
+the straight-line distance between the two endpoints, and $\varepsilon =
+10^{-8}\ \mu m$ guards against a literal zero denominator. The clipping
+bounds exist for two distinct reasons:
+
+- **Lower bound $\tau \ge 1$.** Geometrically a curve can never be shorter
+  than the straight line between its endpoints, so $\tau < 1$ is
+  unphysical. In practice $\tau$ can drop slightly below $1$ from
+  floating-point round-off when summing many short polyline segments on a
+  near-straight branch; clamping at $1$ removes that numerical artefact
+  without distorting any real curvature.
+- **Upper bound $\tau \le 50$.** When a branch forms a near-closed loop the
+  two endpoints can come arbitrarily close in space, so $L_{endpoints} \to
+  0$ and $\tau$ explodes. A handful of such degenerate edges would
+  otherwise dominate any mean / standard-deviation aggregate and dwarf the
+  signal from real winding vessels. Capping at $50$ leaves any biologically
+  realistic value untouched (typical vessel tortuosity is in $[1, 3]$,
+  pathologically tortuous tumour vessels can reach $\sim 10$) while
+  bounding pathological cases. This is also why the curated panel reports
+  `p90_minus_p10_branch_tortuosity` rather than the standard deviation:
+  percentile-based spread is insensitive to whether a few clipped values
+  sit at the cap, whereas $\mathrm{std}$ would be inflated by them.
 
 ### Fractal dimension
 

@@ -519,7 +519,12 @@ def compute_all_morphological_params(global_metrics, branch_metrics_df, junction
             branch_vals = values[~is_sprout]
             sprout_vals = values[is_sprout]
 
-            for agg, fn in [('mean', np.nanmean), ('std', np.nanstd), ('median', np.nanmedian)]:
+            for agg, fn in [
+                ('mean', np.nanmean),
+                ('std', np.nanstd),
+                ('median', np.nanmedian),
+                ('p90_minus_p10', safe_percentile_spread),
+            ]:
                 params[f'{agg}_branch_{param_name}'] = float(fn(branch_vals)) if len(branch_vals) > 0 else np.nan
                 params[f'{agg}_sprout_{param_name}'] = float(fn(sprout_vals)) if len(sprout_vals) > 0 else np.nan
                 params[f'{agg}_sprout_and_branch_{param_name}'] = float(fn(values)) if len(values) > 0 else np.nan
@@ -544,7 +549,12 @@ def compute_all_morphological_params(global_metrics, branch_metrics_df, junction
             junc_vals = values[is_junction]
             tip_vals = values[is_sprout_tip]
 
-            for agg, fn in [('mean', np.nanmean), ('std', np.nanstd), ('median', np.nanmedian)]:
+            for agg, fn in [
+                ('mean', np.nanmean),
+                ('std', np.nanstd),
+                ('median', np.nanmedian),
+                ('p90_minus_p10', safe_percentile_spread),
+            ]:
                 params[f'{agg}_junction_{col_name}'] = float(fn(junc_vals)) if len(junc_vals) > 0 else np.nan
                 params[f'{agg}_sprout_tip_{col_name}'] = float(fn(tip_vals)) if len(tip_vals) > 0 else np.nan
                 params[f'{agg}_all_nodes_{col_name}'] = float(fn(values)) if len(values) > 0 else np.nan
@@ -581,7 +591,7 @@ ANALYSIS_METRICS_COLUMNS = [
     'p90_minus_p10_sprout_and_branch_median_cs_area_um2',
     # Tortuosity — branch-only (2)
     'median_branch_tortuosity',
-    'std_branch_tortuosity',
+    'p90_minus_p10_branch_tortuosity',
     # Sprouting — sprouts-only (1)
     'median_sprout_length_um',
     # Junction connectivity (2)
