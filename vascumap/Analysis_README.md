@@ -1,31 +1,19 @@
 # VascuMap Analysis Outputs — Reference and Biological Interpretation
 
-This document describes the three CSV files produced for every image processed
-by the VascuMap pipeline, the meaning of every column they contain, and the
-reasoning behind the curated subset of features that we recommend using for
-unsupervised clustering and PCA. It is written so that a wet-lab reader (with
-no background in image processing or graph theory) can pick up the outputs and
-interpret them biologically.
-
----
-
-## Output CSVs at a glance
-
-For each input image (`{name_prefix}`) the pipeline writes **three** CSV files
-into the per-image output folder:
+VascuMap outputs three CSV files for each image processed:
 
 | File | Row granularity | Number of columns | Intended use |
 |---|---|---|---|
-| `{name_prefix}_analysis_metrics.csv` | One row per image | ID columns + **19 curated features** | The recommended panel for **PCA, UMAP, and unsupervised clustering** across samples. Hand-picked to be biologically interpretable, shape-invariant, and small enough to behave well with modest sample sizes (tens of images). |
-| `{name_prefix}_all_morphological_params.csv` | One row per image | ID columns + **all** computed metrics (~120) | The full **audit superset**. Contains every global metric the pipeline computes, including disaggregated mean/std/median statistics split by branch vs sprout vs combined, and per-junction-type connectivity stats. Use when you don't yet know what you'll need, when reviewing the pipeline, or when designing new follow-up analyses. |
-| `{name_prefix}_branch_metrics.csv` | One row per skeleton **edge** (vessel segment) | ~25 columns including `node_start`/`node_end` integer IDs | The **graph table**: each row is one branch/sprout in the cleaned vessel graph, with its endpoint coordinates, length, calibre, tortuosity and orientation. Suitable as edge features for a future **graph neural network embedding**, or for plotting per-branch distributions. |
+| `{name_prefix}_analysis_metrics.csv` | One row per image | ID columns + **19 curated features** | The recommended panel for use in the lab. This CSV contains a subset of biologically interpretable, shape-invariant descriptors. |
+| `{name_prefix}_all_morphological_params.csv` | One row per image | ID columns + **all** computed morphological metrics (~120) | Contains every global metric the pipeline computes, including disaggregated mean/std/median statistics split by branch vs sprout vs combined, and per-junction-type connectivity stats. Useful to have on file for future analyses, or useful for future GNN embedding. |
+| `{name_prefix}_branch_metrics.csv` | One row per skeleton **edge** (vessel segment) | ~25 columns including `node_start`/`node_end` integer IDs | The **graph table**: each row is one branch/sprout in the cleaned vessel graph, with its endpoint coordinates, length, calibre, tortuosity and orientation. Suitable as edge features for a future **graph neural network embedding**, or for plotting per-branch distributions. Probably not useful for individual lab users! |
 
 The first three columns of every CSV are identical and identify the image:
 `image_name`, `source_file`, `image_index`.
 
-The curated `analysis_metrics.csv` is *always a strict subset* of
-`all_morphological_params.csv`, so you can move between the two files without
-re-running the pipeline.
+The curated `analysis_metrics.csv` is just a subset of
+`all_morphological_params.csv`, curated for easier plotting/readability
+in the lab.
 
 ---
 
@@ -38,52 +26,46 @@ is `(2, 2, 2) µm`.
 
 Symbols used throughout:
 
-- $V_{chip}$: chip / imaged volume in $\mu m^3$. When an exclusion region
-  (e.g. an organoid) is supplied, its z-extruded volume is **subtracted**
+- $V_{chip}$: chip / imaged volume in $\mu m^3$. When an organoid is imaged,
+- its masked volume is **subtracted**
   from $V_{chip}$ so it does not count as available space.
 - $V_{hull}$: convex-hull volume of the segmented vasculature in $\mu m^3$.
-  When an exclusion region is supplied, the portion of that exclusion
-  region that falls **inside** the hull is also subtracted (see
-  *Convex hull and exclusion regions* below). In symbols:
-  $V_{hull} = V_{hull,\,raw} - V_{exclusion \cap hull}$.
+  When an organoid is masked, the volume of the organoid in the convex hull
+  is subtracted from the hull volume. In symbols:
+  $V_{hull} = V_{hull,\,raw} - V_{organoid \cap hull}$.
 - $V_{vessel}$: total vessel volume (number of vessel-positive voxels times
-  voxel volume) in $\mu m^3$. The exclusion region is zeroed in the
+  voxel volume) in $\mu m^3$. The organoid region is set to zero in the
   segmentation before this is counted, so excluded voxels never contribute.
-- $L_{total}$: total centerline length, summed over all graph edges, in
-  $\mu m$.
+- $L_{total}$: total centerline length of segmented vasculature, summed over all graph
+  edges, in $\mu m$.
 - $N_{junction}$: number of non-sprout graph nodes (i.e. branch points).
 - $N_{sprout}$: number of graph edges incident to at least one sprout (degree-1)
   node.
 - "$P90 - P10$" denotes the spread between the 90th and 10th percentiles of a
-  distribution. We use it as a robust, outlier-tolerant analogue of standard
-  deviation that is easier to interpret as a unit-bearing range.
+  distribution. Selected as a robust, outlier-tolerant measure of the spread of values.
 - "Sprout" = a degree-1 endpoint (a tip). "Branch" = a non-tip edge connecting
   two junctions. "Sprout-and-branch" = the union (every edge in the graph).
 
 ---
 
-## Curated Analysis Metrics — the PCA / clustering panel
+## Curated Analysis Metrics
 
-These 19 features form `*_analysis_metrics.csv`. They were chosen by three
-rules:
+There are 19 features in `*_analysis_metrics.csv`. They were chosen to be:
 
-1. **Shape-invariance.** None of these features scale with the field of view
-   you happened to image. They are either dimensionless ratios (e.g. vessel
+1. **Shape-invariant.** None of these features scales with the chip size.
+   They are either dimensionless ratios (e.g. vessel
    volume fraction), per-unit-length densities (e.g. sprouts per micron of
    vessel), per-unit-volume densities (e.g. length per chip volume), or
    intrinsic per-vessel/per-junction quantities (e.g. typical branch length
    in microns). This means two images of the same biology cropped to
-   different sizes should give very similar values — which is essential for
-   unsupervised clustering, otherwise PCA will trivially separate samples by
-   crop size.
-2. **Biological interpretability.** Every feature has a clear meaning a wet-lab
-   reader can describe in one sentence (e.g. "how curvy a typical vessel is",
-   or "how often vessels branch per unit length").
-3. **Manageable dimensionality.** Nineteen features is small enough to behave
-   well with sample sizes of $\sim 10$–$100$ images, and avoids the algebraic
-   redundancies in the full audit file (e.g. "sprouts per chip volume" is
-   simply "sprouts per length" times "length per chip volume", so we keep only
-   the latter pair).
+   different sizes should give very similar values to prevent PCA from just
+   trivially separating different chip sizes.
+3. **Biologically interpretable.** Features can be thought of in terms of
+   the underlying biology.
+5. **Manageable dimensionality.** Nineteen features is hopefully sufficient to
+   allow PCA clustering at smaller sample sizes, but without introducing a parameter
+   redundancy (e.g. "sprouts per chip volume" is equivalent to "sprouts per length"
+   times "length per chip volume", so we keep only the latter pair).
 
 ### The 19 curated features
 
@@ -91,8 +73,8 @@ rules:
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
-| `vessel_volume_fraction` | $V_{vessel}/V_{hull}$ | The fraction of the convex hull around the vasculature that is actually filled with vessel tissue. A global readout of how densely vascularised the sample is, regardless of how big the imaged region was. **Excluded organoid volume is subtracted from the denominator** so the fraction reflects only the gel/ECM space available for vessels. | Ratio of two volumes, both intrinsic to the sample. |
-| `vessel_length_per_chip_volume_um_inverse2` | $L_{total}/V_{chip}$ | Total amount of vessel "wire" per unit imaged volume. Captures how packed the network is, independent of vessel thickness. Higher means more, finer, or both — denser plumbing. | Length divided by volume → intensive (does not scale with FOV). |
+| `vessel_volume_fraction` | $V_{vessel}/V_{hull}$ | The fraction of the convex hull around the vasculature that is actually filled with vessel tissue. A global readout of how densely vascularised the sample is, regardless of how big the imaged region was. **Excluded organoid volume is subtracted from the denominator** so the fraction reflects only the gel space available for vessels. | Ratio of two volumes, both intrinsic to the sample. |
+| `vessel_length_per_chip_volume_um_inverse2` | $L_{total}/V_{chip}$ | Total amount of vessel "wire" per unit imaged volume. Captures how packed the network is, independent of vessel thickness. Higher means more, finer, or both. | Length divided by volume → intensive (does not scale with FOV). |
 | `sprouts_per_vessel_length_um_inverse` | $N_{sprout}/L_{total}$ | How frequently you encounter a sprout (a tip) per micron of vessel. A direct readout of **angiogenic sprouting intensity** normalised to network size — high values indicate an actively sprouting vasculature. | Count per unit length. |
 | `junctions_per_vessel_length_um_inverse` | $N_{junction}/L_{total}$ | How frequently you encounter a branch point per micron of vessel. A direct readout of **branching intensity** independent of how much vessel you imaged. | Count per unit length. |
 
@@ -100,17 +82,17 @@ rules:
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
-| `skeleton_fractal_dimension` | Box-counting slope $D$ of the cleaned skeleton mask (see *Mathematical caveats* below) | A scale-free complexity index of the centerline network. Higher values ($D \to 2$) mean the network fills space more densely with branches; lower values ($D \to 1$) mean it looks more like a sparse tree. Useful for telling apart "rich, space-filling capillary bed" from "sparse, tree-like vasculature". | Defined as a scaling exponent, intrinsically scale-free. |
+| `skeleton_fractal_dimension` | Box-counting slope $D$ of the cleaned skeleton mask (see *Mathematical caveats* below) | A scale-free complexity index of the centerline network. Higher values ($D \to 2$) mean the network fills space more densely with branches; lower values ($D \to 1$) mean it looks more like a sparse tree. | Defined as a scaling exponent, intrinsically scale-free. |
 | `skeleton_lacunarity` | Variance-to-mean statistic of box-mass distribution on the skeleton | A measure of "patchiness" or unevenness in how branches are distributed in space. Low values mean the network is evenly spread; high values mean there are dense clumps separated by empty regions. Two networks can share fractal dimension but differ strongly in lacunarity. | Constructed from a normalised mass distribution. |
 
 #### Branch geometry — combined sprouts and branches (4 features)
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
-| `median_sprout_and_branch_length_um` | Median of per-edge centerline lengths $L_{path}$ ($\mu m$) | The **typical length of a vessel segment** between two anatomical events (branch points or sprouts). Larger values = longer, less subdivided vessels; smaller values = a finely subdivided, mesh-like network. | An intrinsic length of one structural unit. |
+| `median_sprout_and_branch_length_um` | Median of per-edge centerline lengths $L_{path}$ ($\mu m$) | The **typical length of a vessel segment** between two branch points/branch and sprout. Larger values = longer, less subdivided vessels; smaller values = a finely subdivided, mesh-like network. | An intrinsic length of one structural unit. |
 | `p90_minus_p10_sprout_and_branch_length_um` | $P90(L_{path}) - P10(L_{path})$ ($\mu m$) | How heterogeneous the segment lengths are. A small spread means a uniform mesh; a large spread means the sample has a mixture of short capillary segments and long arterial-like runs. | Difference of two percentiles of an intrinsic length. |
-| `median_sprout_and_branch_median_cs_area_um2` | Median across edges of each edge's median sampled cross-sectional area ($\mu m^2$) | The **typical vessel calibre** (cross-section area) — a thickness proxy. Captures whether the average vessel is a fine capillary or a thicker venule. | Per-vessel measurement, independent of how many vessels are imaged. |
-| `p90_minus_p10_sprout_and_branch_median_cs_area_um2` | $P90 - P10$ of the per-edge median cross-section area ($\mu m^2$) | Heterogeneity of vessel calibre across the network. Large spread = mixed vessel sizes (e.g. arterioles + capillaries); small spread = uniformly sized vessels. | Spread of an intrinsic per-vessel quantity. |
+| `median_sprout_and_branch_median_cs_area_um2` | Median across edges of each edge's median sampled cross-sectional area ($\mu m^2$) | The **typical vessel calibre** (cross-section area) — a thickness proxy. | Per-vessel measurement, independent of how many vessels are imaged. |
+| `p90_minus_p10_sprout_and_branch_median_cs_area_um2` | $P90 - P10$ of the per-edge median cross-section area ($\mu m^2$) | Heterogeneity of vessel calibre (cross-sectional area) across the network. Large spread = mixed vessel sizes; small spread = uniformly sized vessels. | Spread of an intrinsic per-vessel quantity. |
 
 #### Tortuosity — branch-only (2 features)
 
@@ -121,14 +103,14 @@ meaningful than that of fully-formed connecting branches.
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
-| `median_branch_tortuosity` | Median of $\tau = L_{path}/L_{endpoints}$ across non-sprout edges; $\tau$ clipped to $[1, 50]$ | The **typical curviness of a vessel**. $\tau = 1$ means perfectly straight; $\tau > 1$ means winding. Tumour and disturbed vasculature is famously more tortuous than healthy organised vasculature. | Ratio of two lengths; dimensionless. |
-| `std_branch_tortuosity` | Standard deviation of $\tau$ across non-sprout edges | How variable the curviness is across branches. A network can have moderate average tortuosity but very high variability — biologically, this can flag a mixture of organised and chaotic regions. | Standard deviation of a dimensionless quantity. |
+| `median_branch_tortuosity` | Median of $\tau = L_{path}/L_{endpoints}$ across non-sprout edges; $\tau$ clipped to $[1, 50]$ | The **typical curviness of a vessel**. $\tau = 1$ means perfectly straight; $\tau > 1$ means winding. | Ratio of two lengths; dimensionless. |
+| `std_branch_tortuosity` | Standard deviation of $\tau$ across non-sprout edges | How variable the curviness is across branches. | Standard deviation of a dimensionless quantity. |
 
 #### Sprouting — sprouts only (1 feature)
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
-| `median_sprout_length_um` | Median of $L_{path}$ across sprout edges ($\mu m$) | The **typical length a sprout extends** before terminating. Long sprouts indicate active, productive angiogenic extension; short sprouts indicate either nascent sprouting or stalled tips. | Intrinsic length of one anatomical unit. |
+| `median_sprout_length_um` | Median of $L_{path}$ across sprout edges ($\mu m$) | The **typical length a sprout extends** before terminating.  | Intrinsic length of one anatomical unit. |
 
 #### Junction connectivity (2 features)
 
@@ -217,7 +199,7 @@ the graph topology.
 
 ## All Morphological Parameters — full audit reference
 
-`*_all_morphological_params.csv` contains a strict superset of every metric
+`*_all_morphological_params.csv` contains a superset of every metric
 the pipeline computes. It includes:
 
 1. **All of the curated 19 features above** (so you never need to re-run the
@@ -324,19 +306,6 @@ vessel cross-sectional area?"* No — calibre and pore spread are
 **spatial-organisation** metric. You can match one and change the other.
 
   <img src="README_images/lacunarity.png" width="75%" />
-
-### Pore size
-
-Internal pores are detected slice-wise (no linking between $z$ slices —
-tracking pores in 3D is possible but slow, hence the trade-off). A maximum
-pore-area cutoff (`max_pore_area_fraction_of_slice`, default 0.1 = 10% of
-slice area) removes empty regions outside the vasculature. Tiny holes
-(`min_pore_area_um2`, default $16\,\mu m^2$) are also removed to suppress
-segmentation noise and very large likely-artefactual cavities. Pore
-features are kept in the full audit CSV but excluded from the curated
-panel.
-
-  <img src="README_images/holes.png" width="25%" />
 
 ### Convex hull and exclusion regions
 
