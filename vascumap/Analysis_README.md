@@ -96,16 +96,30 @@ There are 19 features in `*_analysis_metrics.csv`. They were chosen to be:
 
 #### Tortuosity — branch-only (2 features)
 
-Sprouts (degree-1 tips) are excluded from these statistics because their
-endpoint distance is dominated by where the skeletonisation algorithm chose
-to terminate the tip — a sprout's free end is wherever distance-transform
-pruning happened to stop, not a biologically meaningful landmark. The ratio
-$L_{path}/L_{endpoints}$ is therefore controlled by an algorithmic choice
-rather than vessel curvature, so we restrict tortuosity statistics to
-fully-formed connecting branches whose two endpoints are both real
-junctions. (Sprout *length* is reported separately below: a sprout's
-centerline length is itself the biologically meaningful quantity, and has no
-problematic denominator, so it is kept.)
+Sprouts (degree-1 tips) are excluded from these statistics. Both pieces of
+tortuosity — the centerline length $L_{path}$ and the chord
+$L_{endpoints}$ — do depend on where the skeletonisation algorithm chose
+to terminate the tip; they are *not* independent of the algorithm. The
+problem with the *ratio* $\tau = L_{path}/L_{endpoints}$ is that it is
+dramatically more sensitive to that choice than either piece alone:
+
+- For a near-straight sprout, $L_{path} \approx L_{endpoints}$, so $\tau
+  \approx 1$ no matter where the tip is cut. Fine.
+- For a curved sprout, the chord $L_{endpoints}$ is a 3-D vector between
+  the junction and the tip. Shifting the tip by a few voxels along a
+  curving centerline can swing that chord across an inflection, changing
+  its *direction* and length disproportionately to the small change in
+  $L_{path}$. Geometrically the chord has $90^{\circ}$-ish failure modes
+  that the arc-length does not. The ratio therefore inherits that
+  instability while the path length itself only changes by the few voxels
+  that were added or removed.
+
+In short, $L_{path}$ is a **measurement** of the sprout (small pruning
+changes → small measurement changes), whereas $\tau$ for a sprout is a
+**ratio whose sensitivity to pruning is unbounded**. We therefore report
+sprout length as a biological readout (next subsection) but restrict
+tortuosity statistics to fully-formed connecting branches whose two
+endpoints are both real junctions.
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
@@ -116,20 +130,25 @@ problematic denominator, so it is kept.)
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
-| `median_sprout_length_um` | Median of $L_{path}$ across sprout edges ($\mu m$) | The **typical length a sprout extends** before terminating. Unlike sprout *tortuosity*, this quantity does not depend on where the algorithm chose to terminate the tip in a problematic way: $L_{path}$ is just the centerline length, so its value is a real biological readout of how far the sprout has grown. | Intrinsic length of one anatomical unit. |
+| `median_sprout_length_um` | Median of $L_{path}$ across sprout edges ($\mu m$) | The **typical length a sprout extends** before terminating. Note that the absolute value depends on where the skeletonisation algorithm chose to prune the tip, so this is best interpreted in a *relative* sense (comparing conditions processed with the same pipeline).| Intrinsic length of one anatomical unit. |
 
 #### Junction connectivity (2 features)
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
 | `median_junction_degree` | Median graph degree of non-sprout nodes (number of edges meeting at a typical branch point) | The **typical branching factor** at a junction. A value near 3 means most branch points are simple Y-junctions (the canonical vascular branching pattern). Higher values indicate more complex multi-way meeting points. | Pure graph-theoretic count at one node; FOV-independent. |
-| `std_junction_degree` | Standard deviation of junction degree | How variable the branching pattern is across the network. A homogeneous capillary bed will have very small variability; a network with frequent multi-way "hubs" will have larger variability. | Standard deviation of a count. |
+| `p90_minus_p10_junction_degree` | $P90 - P10$ of junction degree | How variable the branching pattern is across the network. A homogeneous capillary bed will have very small spread; a network with frequent multi-way "hubs" will have larger spread. Using $P90 - P10$ rather than std is consistent with the other spread metrics and avoids inflation by rare very-high-degree nodes. | Spread of a count; dimensionless. |
 
 #### Orientation (2 features)
 
-Orientation is measured relative to the device long axis (currently the
-$x$ axis). It is the acute angle in the $xy$ plane between each branch's
-end-to-end direction and the device axis, expressed in degrees in $[0, 90]$.
+Orientation is measured relative to the device long axis. The pipeline
+infers the long axis automatically from the image footprint: if the image
+is wider than it is tall ($x$-extent $\ge$ $y$-extent) it uses the $x$
+axis; otherwise it uses the $y$ axis. This means rotated acquisitions are
+handled correctly without any manual configuration. The angle reported is
+the acute angle in the $xy$ plane between each branch's end-to-end
+direction and that auto-detected long axis, expressed in degrees in
+$[0, 90]$.
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
@@ -144,7 +163,7 @@ route), not as straight Euclidean distances; see *Distance Convention* below.
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
 | `median_junction_dist_nearest_junction_um` | Median over branch points of the shortest along-skeleton distance to the nearest other branch point ($\mu m$) | The **characteristic mesh size** of the network — how far you typically have to travel along a vessel to get from one branch point to the next. Captures coarseness of the vascular mesh independently of how big a region you imaged. | Per-junction spacing, intrinsic. |
-| `median_sprout_dist_nearest_endpoint_um` | Median over sprouts of the shortest along-skeleton distance to the nearest other sprout ($\mu m$) | The **typical tip-to-tip spacing**. Small values indicate that sprouts cluster spatially (e.g. coordinated tip-cell selection in a sprouting front); large values indicate isolated sprouts. | Per-sprout spacing, intrinsic. |
+| `median_sprout_tip_dist_nearest_endpoint_um` | Median over sprout-tip nodes of the shortest along-skeleton distance to the nearest other endpoint ($\mu m$) | The **typical tip-to-tip spacing**. Small values indicate that sprouts cluster spatially (e.g. coordinated tip-cell selection in a sprouting front); large values indicate isolated sprouts. | Per-sprout spacing, intrinsic. |
 
 ### Excluded from the curated panel — and why
 
@@ -252,7 +271,7 @@ The columns below are emitted directly by the pipeline (they are the
 | `junctions_per_vessel_length_um_inverse` | $\mu m^{-1}$ | $N_{junction}/L_{total}$ | **Curated.** Branching intensity per unit vessel length. |
 | `skeleton_fractal_dimension` | unitless | Box-counting slope of the cleaned graph-derived skeleton mask. | **Curated.** Geometric complexity of the centerline network. |
 | `skeleton_lacunarity` | unitless | Gap/heterogeneity statistic on the same skeleton mask. | **Curated.** Spatial patchiness / unevenness of the centerline network. |
-| `median_sprout_and_branch_orientation_deg` | degrees | Median per-edge orientation to device $x$-axis. | **Curated.** Dominant vessel alignment. |
+| `median_sprout_and_branch_orientation_deg` | degrees | Median per-edge orientation to the auto-detected device long axis. | **Curated.** Dominant vessel alignment. |
 | `p90_minus_p10_sprout_and_branch_orientation_deg` | degrees | Spread $P90 - P10$ of per-edge orientation. | **Curated.** Anisotropy of vessel alignment. |
 | `median_sprout_and_branch_tortuosity` | unitless | Median per-edge tortuosity over all edges. | Typical winding across the whole network. *(The curated panel keeps the branch-only variant `median_branch_tortuosity` instead.)* |
 | `p90_minus_p10_sprout_and_branch_tortuosity` | unitless | Spread $P90 - P10$ of per-edge tortuosity. | Heterogeneity of winding across the whole network. |
@@ -262,7 +281,7 @@ The columns below are emitted directly by the pipeline (they are the
 | `p90_minus_p10_sprout_and_branch_length_um` | $\mu m$ | Spread of per-edge centerline length. | **Curated.** Heterogeneity of segment lengths. |
 | `median_junction_dist_nearest_junction_um` | $\mu m$ | Median nearest-junction distance, measured along the skeleton. | **Curated.** Characteristic mesh size. |
 | `p90_minus_p10_junction_dist_nearest_junction_um` | $\mu m$ | Spread of nearest-junction distances. | Heterogeneity of branch-point spacing. |
-| `median_sprout_dist_nearest_endpoint_um` | $\mu m$ | Median nearest-endpoint distance among sprout tips. | **Curated.** Typical tip-to-tip spacing. |
+| `median_sprout_tip_dist_nearest_endpoint_um` | $\mu m$ | Median nearest-endpoint distance among sprout tips. | **Curated.** Typical tip-to-tip spacing. |
 | `p90_minus_p10_sprout_dist_nearest_endpoint_um` | $\mu m$ | Spread of nearest-endpoint distances. | Heterogeneity of tip-to-tip spacing. |
 | `average_vessel_volume_um3` | $\mu m^3$ | Mean of `branch_volume_um3` over all edges. | Typical per-segment vessel volume. **Excluded from curated panel** because it is largely a product of typical length and typical calibre, both already kept. |
 | `median_internal_pore_area_um2` | $\mu m^2$ | Median valid pore area across detected slice-wise pores. | Typical pore size. **Excluded from curated panel** (see exclusions section). |

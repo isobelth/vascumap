@@ -596,13 +596,13 @@ ANALYSIS_METRICS_COLUMNS = [
     'median_sprout_length_um',
     # Junction connectivity (2)
     'median_junction_degree',
-    'std_junction_degree',
+    'p90_minus_p10_junction_degree',
     # Orientation — combined sprouts + branches (2)
     'median_sprout_and_branch_orientation_deg',
     'p90_minus_p10_sprout_and_branch_orientation_deg',
     # Spacing (2)
     'median_junction_dist_nearest_junction_um',
-    'median_sprout_dist_nearest_endpoint_um',
+    'median_sprout_tip_dist_nearest_endpoint_um',
 ]
 
 
@@ -626,7 +626,7 @@ def build_curated_analysis_metrics_df(all_params_df):
 # Network headline metrics
 # ---------------------------------------------------------------------------
 
-def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), distance_mode='skeleton'):
+def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), distance_mode='skeleton', device_axis='x'):
     """Aggregate per-branch metrics into network-level headline statistics."""
     voxel_size_um = np.asarray(voxel_size_um, dtype=float)
     summary = {
@@ -651,7 +651,7 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
             if len(pts) < 2:
                 continue
             pts_um = np.asarray(pts, dtype=float) * voxel_size_um[None, :]
-            orientations_deg.append(orientation_to_device_axis_deg(pts_um, device_axis='x'))
+            orientations_deg.append(orientation_to_device_axis_deg(pts_um, device_axis=device_axis))
 
             segment_areas = area_image[pts[:, 0], pts[:, 1], pts[:, 2]]
             median_cs_areas.append(float(np.nanmedian(segment_areas)))
@@ -1089,6 +1089,11 @@ def clean_and_analyse(
     chunk_size = (vasculature_segmentation.shape[0], 512, 512)
     max_internal_pore_area_fraction_of_slice = 0.10
 
+    # Determine the device long axis from the image footprint (y=shape[1], x=shape[2]).
+    # If x-extent >= y-extent the image is landscape → long axis is x; otherwise y.
+    _h, _w = vasculature_segmentation.shape[1], vasculature_segmentation.shape[2]
+    device_axis = 'x' if _w >= _h else 'y'
+
     # ---- apply exclusion mask (e.g. organoid region) ----
     if exclusion_mask_xy is not None:
         exclusion_mask_xy = np.asarray(exclusion_mask_xy, dtype=bool)
@@ -1249,7 +1254,7 @@ def clean_and_analyse(
         clean_graph,
         area_image,
         voxel_size_um=voxel_size_um,
-        device_axis='x',
+        device_axis=device_axis,
     )
 
     if clean_graph.number_of_nodes() > 0 and clean_graph.number_of_edges() > 0:
@@ -1259,6 +1264,7 @@ def clean_and_analyse(
                 area_image,
                 voxel_size_um=voxel_size_um,
                 distance_mode=junction_distance_mode,
+                device_axis=device_axis,
             )
         )
 
