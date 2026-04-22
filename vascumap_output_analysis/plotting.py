@@ -307,4 +307,4 @@ def pca_plots(combined_analysis_metrics, condition_colors, save_dir=None):
         return feat_imp.head(5).index.to_list()
 
     print(f"Significant features: {len(sig_features)} / {len(X.columns)}")
-    return sig_features.index.to_list()
+    return (sig_features.index.to_list(), feat_imp.head(5).index.to_list())
