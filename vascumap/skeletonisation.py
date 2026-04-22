@@ -171,6 +171,40 @@ def remove_mid_node(graph):
     return graph
 
 
+def build_branch_only_graph(graph):
+    """Return a sprout-collapsed copy of *graph* for branch-geometry stats.
+
+    A junction that only has degree > 2 because it carries a sprout
+    (e.g. ``A — J — B`` with a tip ``S`` hanging off ``J``) artificially
+    splits a single real ``A — B`` vessel into two short edges in the
+    cleaned graph, biasing every ``*_branch_*`` length / tortuosity /
+    calibre statistic. To remove that bias we drop every degree-1
+    (sprout) node and then re-run mid-node collapse: junctions like
+    ``J`` that fall from degree 3 to degree 2 once ``S`` is removed are
+    merged so that ``A — J — B`` becomes a single ``A — B`` edge whose
+    polyline is the concatenation of the two original polylines.
+
+    Junction counts, junction connectivity, sprout-side stats and
+    densities are *not* computed from this graph — they continue to use
+    the original cleaned graph so that a sprout-bearing junction still
+    counts as a junction.
+    """
+    g = graph.copy()
+    g.remove_nodes_from([n for n in list(g.nodes())
+                         if g.nodes[n].get('sprout', False)])
+    # Some former junctions may now be orphaned degree-0/1 nodes (e.g.
+    # a short A—J—S chain whose A was itself only kept because of
+    # another sprout). Iteratively drop them so they don't reintroduce
+    # sprout-like terminations into the branch-only view. We do not
+    # mark them as sprouts; we just remove them.
+    while True:
+        leftover = [n for n, d in g.degree() if d <= 1]
+        if not leftover:
+            break
+        g.remove_nodes_from(leftover)
+    return remove_mid_node(g)
+
+
 def collect_border_vicinity_edges(graph, image_shape, vicinity_xy=50, inplace=False):
     """Remove graph edges that pass within vicinity_xy pixels of the image XY border."""
     border_vicinity_edges = set()
@@ -486,12 +520,25 @@ def compute_junction_metrics_df(graph, voxel_size_um=(2.0, 2.0, 2.0), distance_t
 # Comprehensive morphological parameters (all legacy + current metrics)
 # ---------------------------------------------------------------------------
 
-def compute_all_morphological_params(global_metrics, branch_metrics_df, junction_metrics_df):
+def compute_all_morphological_params(
+    global_metrics, branch_metrics_df, branch_only_metrics_df, junction_metrics_df,
+):
     """Build single-row DataFrame with all morphological parameters.
 
     Includes everything in the simplified CSV plus full disaggregated
     statistics: mean/std/median × branch/sprout/combined for vessel metrics,
     and mean/std/median × junction/sprout_tip/combined for junction metrics.
+
+    Parameters
+    ----------
+    branch_metrics_df : pd.DataFrame
+        Per-edge metrics from the full cleaned graph (sprouts present).
+        Source for ``*_sprout_*`` and ``*_sprout_and_branch_*`` aggregates.
+    branch_only_metrics_df : pd.DataFrame
+        Per-edge metrics from the sprout-collapsed graph (sprout-bearing
+        intermediate junctions dissolved). Source for ``*_branch_*``
+        aggregates so a vessel ``A — J — B`` with a tip off ``J``
+        contributes one branch rather than two.
     """
     params = dict(global_metrics)
 
@@ -512,11 +559,19 @@ def compute_all_morphological_params(global_metrics, branch_metrics_df, junction
             'orientation': 'orientation_to_device_axis',
         }
 
+        have_collapsed = (
+            branch_only_metrics_df is not None
+            and not branch_only_metrics_df.empty
+        )
+
         for param_name, col_name in vessel_agg_columns.items():
             if col_name not in branch_metrics_df.columns:
                 continue
             values = branch_metrics_df[col_name].to_numpy(dtype=float)
-            branch_vals = values[~is_sprout]
+            if have_collapsed and col_name in branch_only_metrics_df.columns:
+                branch_vals = branch_only_metrics_df[col_name].to_numpy(dtype=float)
+            else:
+                branch_vals = np.asarray([], dtype=float)
             sprout_vals = values[is_sprout]
 
             for agg, fn in [
@@ -1160,6 +1215,17 @@ def clean_and_analyse(
     for node in clean_graph.nodes():
         clean_graph.nodes[node]['sprout'] = clean_graph.degree(node) == 1
 
+    # Sprout-collapsed view: drop every sprout (degree-1) node and re-run
+    # mid-node collapse. A junction whose only reason to be degree > 2
+    # was a sprout is dissolved, so a vessel A — J — B with a tip off J
+    # appears as a single A — B edge here. Used as the source for every
+    # ``*_branch_*`` aggregate and for ``branches_per_hull_volume`` /
+    # ``total_number_of_branches``. Junction counts, junction
+    # connectivity, sprout-side stats and densities continue to use
+    # ``clean_graph`` so a sprout-bearing junction still counts as a
+    # junction.
+    branch_only_graph = build_branch_only_graph(clean_graph)
+
     # ---- metrics ----
     global_metrics = {}
     chip_volume_um3 = float(np.prod(vasculature_segmentation.shape)) * voxel_volume_um3
@@ -1216,25 +1282,16 @@ def clean_and_analyse(
 
     if clean_graph.number_of_edges() > 0:
         fd, lacunarity = fractal_dimension_and_lacunarity(skeleton_from_graph > 0)
-        # All-edge length (sprouts + branches) and branch-only length.
-        per_edge_length_um = []
-        per_edge_is_sprout = []
-        for u, v in clean_graph.edges():
-            edge_len = float(np.linalg.norm(
-                np.diff(clean_graph[u][v]['pts'].astype(float) * voxel_size_um[None, :], axis=0),
-                axis=1,
-            ).sum())
-            per_edge_length_um.append(edge_len)
-            per_edge_is_sprout.append(
-                clean_graph.nodes[u]['sprout'] or clean_graph.nodes[v]['sprout']
-            )
-        per_edge_length_um = np.asarray(per_edge_length_um, dtype=float)
-        per_edge_is_sprout = np.asarray(per_edge_is_sprout, dtype=bool)
-        total_vessel_length_um = float(per_edge_length_um.sum())
-        total_branch_length_um = float(per_edge_length_um[~per_edge_is_sprout].sum())
-        branchpoints_count = sum(1 for u in clean_graph.nodes() if not clean_graph.nodes[u]['sprout'])
-        sprouts_count = int(per_edge_is_sprout.sum())
-        branches_count = int((~per_edge_is_sprout).sum())
+        # Sprout/junction counts come from the original cleaned graph so
+        # a sprout-bearing junction still counts as a junction.
+        per_edge_is_sprout = [
+            clean_graph.nodes[u]['sprout'] or clean_graph.nodes[v]['sprout']
+            for u, v in clean_graph.edges()
+        ]
+        sprouts_count = int(sum(per_edge_is_sprout))
+        branchpoints_count = sum(
+            1 for n in clean_graph.nodes() if not clean_graph.nodes[n]['sprout']
+        )
         # Floating components: connected components in which every node is a
         # sprout (degree-1 endpoint). These are vessel fragments not attached
         # to the branching network — e.g. a single edge whose two endpoints
@@ -1243,10 +1300,28 @@ def clean_and_analyse(
             1 for cc in nx.connected_components(clean_graph)
             if all(clean_graph.nodes[n]['sprout'] for n in cc)
         )
+        # L_total and the branch count come from the sprout-collapsed
+        # graph so an A — J — B vessel with a sprout off J is a single
+        # branch, not two. Polyline lengths are preserved by the
+        # ``remove_mid_node`` merge, so summing here gives the same total
+        # as summing the non-sprout edges of clean_graph would.
+        if branch_only_graph.number_of_edges() > 0:
+            branch_only_lengths = np.asarray([
+                float(np.linalg.norm(
+                    np.diff(branch_only_graph[u][v]['pts'].astype(float)
+                            * voxel_size_um[None, :], axis=0),
+                    axis=1,
+                ).sum())
+                for u, v in branch_only_graph.edges()
+            ], dtype=float)
+            total_vessel_length_um = float(branch_only_lengths.sum())
+            branches_count = int(branch_only_graph.number_of_edges())
+        else:
+            total_vessel_length_um = 0.0
+            branches_count = 0
     else:
         fd, lacunarity = np.nan, np.nan
         total_vessel_length_um = 0.0
-        total_branch_length_um = 0.0
         branchpoints_count = 0
         sprouts_count = 0
         branches_count = 0
@@ -1257,10 +1332,9 @@ def clean_and_analyse(
     global_metrics['vessel_volume'] = vessel_volume_um3
     global_metrics['vessel_volume_fraction'] = safe_divide(vessel_volume_um3, convex_hull_volume_um3)
     global_metrics['total_vessel_length'] = float(total_vessel_length_um)
-    global_metrics['total_branch_length'] = float(total_branch_length_um)
     # Length-density: branch-only length per hull volume (sprouts excluded).
     global_metrics['branch_length_per_hull_volume'] = safe_divide(
-        total_branch_length_um, convex_hull_volume_um3,
+        total_vessel_length_um, convex_hull_volume_um3,
     )
     global_metrics['sprouts_per_vessel_length'] = safe_divide(sprouts_count, total_vessel_length_um)
     global_metrics['junctions_per_vessel_length'] = safe_divide(branchpoints_count, total_vessel_length_um)
@@ -1279,6 +1353,16 @@ def clean_and_analyse(
 
     branch_metrics_df = compute_branch_metrics_df(
         clean_graph,
+        area_image,
+        voxel_size_um=voxel_size_um,
+        device_axis=device_axis,
+    )
+    # Per-edge metrics on the sprout-collapsed graph: each row here
+    # corresponds to a real branch in which any sprout-bearing
+    # intermediate junctions have been merged. Used as the source of the
+    # ``*_branch_*`` aggregates downstream.
+    branch_only_metrics_df = compute_branch_metrics_df(
+        branch_only_graph,
         area_image,
         voxel_size_um=voxel_size_um,
         device_axis=device_axis,
@@ -1336,7 +1420,7 @@ def clean_and_analyse(
 
     # ---- comprehensive all-params DataFrame ----
     all_morphological_params_df = compute_all_morphological_params(
-        global_metrics, branch_metrics_df, junction_metrics_df,
+        global_metrics, branch_metrics_df, branch_only_metrics_df, junction_metrics_df,
     )
 
     # ---- curated, shape-invariant analysis-metrics panel (PCA / clustering) ----
@@ -1347,6 +1431,7 @@ def clean_and_analyse(
         'global_metrics': global_metrics,
         'global_metrics_df': global_metrics_df,
         'branch_metrics_df': branch_metrics_df,
+        'branch_only_metrics_df': branch_only_metrics_df,
         'junction_metrics_df': junction_metrics_df,
         'all_morphological_params_df': all_morphological_params_df,
         'analysis_metrics_df': analysis_metrics_df,
@@ -1359,5 +1444,6 @@ def clean_and_analyse(
         'area_image': area_image,
         'pruned_graph': pruned_graph,
         'clean_graph': clean_graph,
+        'branch_only_graph': branch_only_graph,
         'skeleton_from_graph': skeleton_from_graph,
     }

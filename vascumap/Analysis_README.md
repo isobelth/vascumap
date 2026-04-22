@@ -36,8 +36,8 @@ Symbols used throughout:
 - $V_{vessel}$: total vessel volume (number of vessel-positive voxels times
   voxel volume) in $\mu m^3$. The organoid region is set to zero in the
   segmentation before this is counted, so excluded voxels never contribute.
-- $L_{total}$: total centerline length of segmented vasculature, summed over all graph
-  edges, in $\mu m$.
+- $L_{total}$: total centerline length of **non-sprout** graph edges in $\mu m$
+  (sprout edges are excluded because their length depends on tip-pruning depth).
 - $N_{junction}$: number of non-sprout graph nodes (i.e. branch points).
 - $N_{sprout}$: number of graph edges incident to at least one sprout (degree-1)
   node.
@@ -46,33 +46,39 @@ Symbols used throughout:
 - "Sprout" = a degree-1 endpoint (a tip). "Branch" = a non-tip edge connecting
   two junctions. "Sprout-and-branch" = the union (every edge in the graph).
 
-### Units convention for column names
-
-To keep parameter names short and readable, **column names do not carry
-unit suffixes** (no `_um`, `_um2`, `_um3`, `_um_inverse2`, `_deg` etc.).
-Units are implicit and follow these conventions:
-
-| Quantity in the name | Implicit unit |
-|---|---|
-| `*_length`, `*_distance`, `*_width`, any single-coordinate (`x`, `y`, `z`, `start_z`, ...) | $\mu m$ |
-| `*_area`, `*_cs_area` | $\mu m^2$ |
-| `*_volume` | $\mu m^3$ |
-| `*_per_vessel_length` | $\mu m^{-1}$ |
-| `*_per_hull_volume` | $\mu m^{-3}$ (count per volume) or $\mu m^{-2}$ (length per volume) — depending on the numerator |
-| `*_orientation` | degrees in $[0, 90]$ |
-| `*_tortuosity`, `*_volume_fraction`, `*_fractal_dimension`, `*_lacunarity`, `degree`, neighbour counts | dimensionless |
-| `total_number_of_*` | integer count |
-
 Voxel-index variants of per-edge endpoint coordinates carry an `_idx`
 suffix (e.g. `start_z_idx`) to distinguish them from the physical-µm
-versions (e.g. `start_z`).
-
-The aggregator prefix follows the convention
+versions (e.g. `start_z`). Aggregator column names follow
 `<aggregate>_<subset>_<column>`, where `<aggregate>` is one of `mean`,
 `std`, `median`, or `spread` (the P90 − P10 difference, an
-outlier-robust measure of distribution width). For example,
-`spread_branch_length` is the P90 − P10 of per-non-sprout-edge centerline
-lengths in $\mu m$.
+outlier-robust measure of distribution width).
+
+### Branch-only vs full cleaned graph
+
+Two views of the graph are used internally:
+
+- The **cleaned graph** (`clean_graph`): the result of pruning,
+  mid-node removal, and border / exclusion / isolated-node trimming.
+  Sprout edges are still present here. Used for sprout counts,
+  junction counts, junction connectivity, every `*_sprout_*` and
+  `*_sprout_and_branch_*` aggregate, and all density denominators
+  except those involving branches.
+- The **branch-only graph** (`branch_only_graph`): the cleaned graph
+  with every sprout (degree-1) node removed and `remove_mid_node`
+  re-applied. A junction whose only reason to be degree > 2 was a
+  sprout (e.g. ``A — J — B`` with a tip ``S`` off ``J``) is therefore
+  *dissolved*: the polylines of ``A — J`` and ``J — B`` are
+  concatenated into a single ``A — B`` edge. Used as the source for
+  every `*_branch_*` aggregate, for `total_vessel_length` / $L_{total}$,
+  for `branch_length_per_hull_volume`, and for the branch count
+  (`total_number_of_branches`, `branches_per_hull_volume`).
+
+Without this collapse, a single biological vessel that happens to carry
+a sprout midway along its length would be split into two short edges in
+the cleaned graph, biasing `median_branch_length` downward, inflating
+`branches_per_hull_volume`, and altering branch tortuosity / calibre
+statistics. Total length is preserved by the merge
+(`L_total` is unchanged), but per-branch medians and counts are not.
 
 ---
 
@@ -102,13 +108,13 @@ is the biologically available gel space inside the vascular envelope.
 
 #### Density (5 features)
 
-| Column | Math | Biological meaning | Why it is shape-invariant |
-|---|---|---|---|
-| `vessel_volume_fraction` | $V_{vessel}/V_{hull}$ | The fraction of the convex hull around the vasculature that is actually filled with vessel tissue. A global readout of how densely vascularised the sample is, regardless of how big the imaged region was. **Excluded organoid volume is subtracted from the denominator** so the fraction reflects only the gel space available for vessels. | Ratio of two volumes, both intrinsic to the sample. |
-| `branch_length_per_hull_volume` | $L_{branch}/V_{hull}$ | Total amount of **non-sprout** vessel "wire" per unit envelope volume. Sprouts are excluded from the numerator because their length depends on tip-pruning depth. Higher means more or finer connecting vasculature. | Length divided by volume → intensive (does not scale with FOV). |
-| `sprouts_per_hull_volume` | $N_{sprout}/V_{hull}$ | Sprout count per unit envelope volume — the spatial density of tips within the gel space. A direct readout of **angiogenic sprouting intensity**. | Count per volume. |
-| `junctions_per_hull_volume` | $N_{junction}/V_{hull}$ | Junction count per unit envelope volume — the spatial density of branch points within the gel space. A direct readout of **branching intensity**. | Count per volume. |
-| `branches_per_hull_volume` | $N_{branch}/V_{hull}$ | Non-sprout edge count per unit envelope volume. Together with `junctions_per_hull_volume`, parameterises mesh fineness in two complementary ways (count of vertices vs count of edges). | Count per volume. |
+| Column | Units | Math | Biological meaning | Why it is shape-invariant |
+|---|---|---|---|---|
+| `vessel_volume_fraction` | unitless | $V_{vessel}/V_{hull}$ | The fraction of the convex hull around the vasculature that is actually filled with vessel tissue. A global readout of how densely vascularised the sample is, regardless of how big the imaged region was. **Excluded organoid volume is subtracted from the denominator** so the fraction reflects only the gel space available for vessels. | Ratio of two volumes, both intrinsic to the sample. |
+| `branch_length_per_hull_volume` | $\mu m^{-2}$ | $L_{total}/V_{hull}$ | Total amount of **non-sprout** vessel "wire" per unit envelope volume. Sprouts are excluded from the numerator because their length depends on tip-pruning depth. Higher means more or finer connecting vasculature. | Length divided by volume → intensive (does not scale with FOV). |
+| `sprouts_per_hull_volume` | $\mu m^{-3}$ | $N_{sprout}/V_{hull}$ | Sprout count per unit envelope volume — the spatial density of tips within the gel space. A direct readout of **angiogenic sprouting intensity**. | Count per volume. |
+| `junctions_per_hull_volume` | $\mu m^{-3}$ | $N_{junction}/V_{hull}$ | Junction count per unit envelope volume — the spatial density of branch points within the gel space. A direct readout of **branching intensity**. | Count per volume. |
+| `branches_per_hull_volume` | $\mu m^{-3}$ | $N_{branch}/V_{hull}$ | **Curated.** Non-sprout edge count per unit envelope volume, taken from the **branch-only graph** (sprout-bearing intermediate junctions dissolved). | Count per volume. |
 
 The per-vessel-length variants (`sprouts_per_vessel_length`,
 `junctions_per_vessel_length`) are kept in the full
@@ -118,10 +124,10 @@ are largely captured by the per-hull-volume densities together with
 
 #### Topology (2 features)
 
-| Column | Math | Biological meaning | Why it is shape-invariant |
-|---|---|---|---|
-| `skeleton_fractal_dimension` | Box-counting slope $D$ of the cleaned skeleton mask (see *Mathematical caveats* below) | A scale-free complexity index of the centerline network. Higher values ($D \to 2$) mean the network fills space more densely with branches; lower values ($D \to 1$) mean it looks more like a sparse tree. | Defined as a scaling exponent, intrinsically scale-free. |
-| `skeleton_lacunarity` | Variance-to-mean statistic of box-mass distribution on the skeleton | A measure of "patchiness" or unevenness in how branches are distributed in space. Low values mean the network is evenly spread; high values mean there are dense clumps separated by empty regions. Two networks can share fractal dimension but differ strongly in lacunarity. | Constructed from a normalised mass distribution. |
+| Column | Units | Math | Biological meaning | Why it is shape-invariant |
+|---|---|---|---|---|
+| `skeleton_fractal_dimension` | unitless | Box-counting slope $D$ of the cleaned skeleton mask (see *Mathematical caveats* below) | A scale-free complexity index of the centerline network. Higher values ($D \to 2$) mean the network fills space more densely with branches; lower values ($D \to 1$) mean it looks more like a sparse tree. | Defined as a scaling exponent, intrinsically scale-free. |
+| `skeleton_lacunarity` | unitless | Variance-to-mean statistic of box-mass distribution on the skeleton | A measure of "patchiness" or unevenness in how branches are distributed in space. Low values mean the network is evenly spread; high values mean there are dense clumps separated by empty regions. Two networks can share fractal dimension but differ strongly in lacunarity. | Constructed from a normalised mass distribution. |
 
 #### Branch geometry — branches only (4 features)
 
@@ -130,12 +136,23 @@ junction nodes). Sprout edges are excluded because their length and
 calibre depend on where the skeletonisation pipeline chose to terminate
 the tip (see *Tortuosity — branch-only* below).
 
-| Column | Math | Biological meaning | Why it is shape-invariant |
-|---|---|---|---|
-| `median_branch_length` | Median of per-edge centerline lengths $L_{path}$ across non-sprout edges ($\mu m$) | The **typical length of a connecting vessel segment** between two branch points. Larger values = longer, less subdivided vessels; smaller values = a finely subdivided, mesh-like network. | An intrinsic length of one structural unit. |
-| `spread_branch_length` | $P90(L_{path}) - P10(L_{path})$ across non-sprout edges ($\mu m$) | How heterogeneous the connecting-segment lengths are. A small spread means a uniform mesh; a large spread means the sample has a mixture of short capillary segments and long arterial-like runs. | Difference of two percentiles of an intrinsic length. |
-| `median_branch_median_cs_area` | Median across non-sprout edges of each edge's median sampled cross-sectional area ($\mu m^2$) | The **typical vessel calibre** (cross-section area) — a thickness proxy — for established (non-tip) vasculature. | Per-vessel measurement, independent of how many vessels are imaged. |
-| `spread_branch_median_cs_area` | $P90 - P10$ of the per-edge median cross-section area across non-sprout edges ($\mu m^2$) | Heterogeneity of vessel calibre across the connecting network. Large spread = mixed vessel sizes; small spread = uniformly sized vessels. | Spread of an intrinsic per-vessel quantity. |
+> **Important — sprout-bearing junctions are dissolved before these
+> aggregates are computed.** Aggregates in this section are computed
+> on the **branch-only graph**: every sprout (degree-1) node is
+> removed from the cleaned graph and `remove_mid_node` is re-applied,
+> so a vessel ``A — J — B`` with a tip ``S`` off ``J`` is treated as
+> *one* branch (the merged ``A — B`` polyline) rather than two short
+> edges meeting at ``J``. This avoids artificially deflating
+> `median_branch_length`, inflating `branches_per_hull_volume`, and
+> distorting branch tortuosity. See *Branch-only vs full cleaned
+> graph* in *Scope and notation*.
+
+| Column | Units | Math | Biological meaning | Why it is shape-invariant |
+|---|---|---|---|---|
+| `median_branch_length` | $\mu m$ | Median of per-edge centerline lengths $L_{path}$ across non-sprout edges | The **typical length of a connecting vessel segment** between two branch points. Larger values = longer, less subdivided vessels; smaller values = a finely subdivided, mesh-like network. | An intrinsic length of one structural unit. |
+| `spread_branch_length` | $\mu m$ | $P90(L_{path}) - P10(L_{path})$ across non-sprout edges | How heterogeneous the connecting-segment lengths are. A small spread means a uniform mesh; a large spread means the sample has a mixture of short capillary segments and long arterial-like runs. | Difference of two percentiles of an intrinsic length. |
+| `median_branch_median_cs_area` | $\mu m^2$ | Median across non-sprout edges of each edge's median sampled cross-sectional area | The **typical vessel calibre** (cross-section area) — a thickness proxy — for established (non-tip) vasculature. | Per-vessel measurement, independent of how many vessels are imaged. |
+| `spread_branch_median_cs_area` | $\mu m^2$ | $P90 - P10$ of the per-edge median cross-section area across non-sprout edges | Heterogeneity of vessel calibre across the connecting network. Large spread = mixed vessel sizes; small spread = uniformly sized vessels. | Spread of an intrinsic per-vessel quantity. |
 
 Sprout-only geometry features (`median_sprout_length`,
 `spread_sprout_length`, `median_sprout_median_cs_area`,
@@ -171,17 +188,17 @@ sprout length as a biological readout (next subsection) but restrict
 tortuosity statistics to fully-formed connecting branches whose two
 endpoints are both real junctions.
 
-| Column | Math | Biological meaning | Why it is shape-invariant |
-|---|---|---|---|
-| `median_branch_tortuosity` | Median of $\tau = L_{path}/L_{endpoints}$ across non-sprout edges; $\tau$ clipped to $[1, 50]$ | The **typical curviness of a vessel**. $\tau = 1$ means perfectly straight; $\tau > 1$ means winding. | Ratio of two lengths; dimensionless. |
-| `spread_branch_tortuosity` | $P90(\tau) - P10(\tau)$ across non-sprout edges | How heterogeneous the curviness is across branches — a small spread means uniformly straight (or uniformly winding) vessels, a large spread means a mix of straight and tortuous vessels coexist. We use a percentile spread rather than the standard deviation here so that the small number of clipped-at-50 outliers (see *Tortuosity clipping*, below) cannot dominate the statistic. | Difference of two percentiles of a dimensionless quantity. |
+| Column | Units | Math | Biological meaning | Why it is shape-invariant |
+|---|---|---|---|---|
+| `median_branch_tortuosity` | unitless | Median of $\tau = L_{path}/L_{endpoints}$ across non-sprout edges; $\tau$ clipped to $[1, 50]$ | The **typical curviness of a vessel**. $\tau = 1$ means perfectly straight; $\tau > 1$ means winding. | Ratio of two lengths; dimensionless. |
+| `spread_branch_tortuosity` | unitless | $P90(\tau) - P10(\tau)$ across non-sprout edges | How heterogeneous the curviness is across branches — a small spread means uniformly straight (or uniformly winding) vessels, a large spread means a mix of straight and tortuous vessels coexist. We use a percentile spread rather than the standard deviation here so that the small number of clipped-at-50 outliers (see *Tortuosity clipping*, below) cannot dominate the statistic. | Difference of two percentiles of a dimensionless quantity. |
 
 #### Junction connectivity (2 features)
 
-| Column | Math | Biological meaning | Why it is shape-invariant |
-|---|---|---|---|
-| `median_junction_degree` | Median graph degree of non-sprout nodes (number of edges meeting at a typical branch point) | The **typical branching factor** at a junction. A value near 3 means most branch points are simple Y-junctions (the canonical vascular branching pattern). Higher values indicate more complex multi-way meeting points. | Pure graph-theoretic count at one node; FOV-independent. |
-| `spread_junction_degree` | $P90 - P10$ of junction degree | How variable the branching pattern is across the network. A homogeneous capillary bed will have very small spread; a network with frequent multi-way "hubs" will have larger spread. Using $P90 - P10$ rather than std is consistent with the other spread metrics and avoids inflation by rare very-high-degree nodes. | Spread of a count; dimensionless. |
+| Column | Units | Math | Biological meaning | Why it is shape-invariant |
+|---|---|---|---|---|
+| `median_junction_degree` | unitless | Median graph degree of non-sprout nodes (number of edges meeting at a typical branch point) | The **typical branching factor** at a junction. A value near 3 means most branch points are simple Y-junctions (the canonical vascular branching pattern). Higher values indicate more complex multi-way meeting points. | Pure graph-theoretic count at one node; FOV-independent. |
+| `spread_junction_degree` | unitless | $P90 - P10$ of junction degree | How variable the branching pattern is across the network. A homogeneous capillary bed will have very small spread; a network with frequent multi-way "hubs" will have larger spread. Using $P90 - P10$ rather than std is consistent with the other spread metrics and avoids inflation by rare very-high-degree nodes. | Spread of a count; dimensionless. |
 
 #### Orientation (2 features)
 
@@ -194,10 +211,10 @@ the acute angle in the $xy$ plane between each branch's end-to-end
 direction and that auto-detected long axis, expressed in degrees in
 $[0, 90]$.
 
-| Column | Math | Biological meaning | Why it is shape-invariant |
-|---|---|---|---|
-| `median_sprout_and_branch_orientation` | Median branch orientation in degrees | The **dominant alignment** of vessels with respect to the device. A value near $45°$ means no preferred direction (isotropic); values near $0°$ or $90°$ indicate strong alignment with or perpendicular to the device axis (e.g. flow-induced alignment in a perfused chamber). | Per-branch angle; geometry independent of FOV size. |
-| `spread_sprout_and_branch_orientation` | $P90 - P10$ of branch orientation in degrees | Network **anisotropy**: how concentrated the orientations are around their median. A small spread means almost all vessels point in the same direction; a large spread (towards $80°$) means orientations are nearly uniform. | Spread of a dimensionless angle. |
+| Column | Units | Math | Biological meaning | Why it is shape-invariant |
+|---|---|---|---|---|
+| `median_sprout_and_branch_orientation` | degrees in $[0, 90]$ | Median branch orientation | The **dominant alignment** of vessels with respect to the device. A value near $45°$ means no preferred direction (isotropic); values near $0°$ or $90°$ indicate strong alignment with or perpendicular to the device axis (e.g. flow-induced alignment in a perfused chamber). | Per-branch angle; geometry independent of FOV size. |
+| `spread_sprout_and_branch_orientation` | degrees | $P90 - P10$ of branch orientation | Network **anisotropy**: how concentrated the orientations are around their median. A small spread means almost all vessels point in the same direction; a large spread (towards $80°$) means orientations are nearly uniform. | Spread of an angle. |
 
 Nearest-neighbour spacing metrics (`*_dist_nearest_*`) are not part of the
 curated panel — they remain available in the full
@@ -211,10 +228,11 @@ The following columns appear in the full
 curated panel:
 
 - `chip_volume`, `convex_hull_volume`, `vessel_volume`,
-  `total_vessel_length`, `total_branch_length` — **raw size/length
-  quantities**. These scale directly with the cropped field of view and would
-  dominate any unsupervised analysis with a "big-vs-small image" axis instead
-  of biology.
+  `total_vessel_length` — **raw size/length quantities**. These scale
+  directly with the cropped field of view and would dominate any
+  unsupervised analysis with a "big-vs-small image" axis instead of biology.
+  ($L_{total}$ is computed as the sum over **non-sprout** edges only —
+  sprouts are excluded because their length depends on tip-pruning depth.)
 - `total_number_of_sprouts`, `total_number_of_branches`,
   `total_number_of_junctions`, `total_number_of_edges`,
   `total_number_of_nodes`, `total_number_of_floating_sprouts` — **raw
@@ -304,14 +322,13 @@ The columns below are emitted directly by the pipeline (they are the
 | `convex_hull_volume` | $\mu m^3$ | $V_{hull}$, volume of the 3D convex hull of vessel-positive voxels. | The "envelope" the vasculature occupies. **Excluded from curated panel** for the same reason. |
 | `vessel_volume` | $\mu m^3$ | $V_{vessel}$, total vessel-positive volume. | Total vascular biomass. **Excluded from curated panel.** |
 | `vessel_volume_fraction` | unitless | $V_{vessel}/V_{hull}$ | **Curated.** Fraction of hull occupied by vessels. |
-| `total_vessel_length` | $\mu m$ | $L_{total}$ from summed edge polyline lengths (all edges, sprouts + branches). | Total vascular extent by centerline length. **Excluded from curated panel.** |
-| `total_branch_length` | $\mu m$ | $L_{branch}$, sum of polyline lengths over **non-sprout** edges only. | Total length of established (non-tip) vasculature. **Excluded from curated panel** (size-dependent); used internally as the numerator of `branch_length_per_hull_volume`. |
-| `branch_length_per_hull_volume` | $\mu m^{-2}$ | $L_{branch}/V_{hull}$ | **Curated.** 3D length density of non-sprout vasculature. |
+| `total_vessel_length` | $\mu m$ | $L_{total}$, sum of polyline lengths over the **branch-only graph** (sprout-bearing intermediate junctions dissolved; sprouts excluded — their length depends on tip-pruning depth). | Total length of established (non-tip) vasculature. **Excluded from curated panel** (size-dependent); used internally as the numerator of `branch_length_per_hull_volume`. |
+| `branch_length_per_hull_volume` | $\mu m^{-2}$ | $L_{total}/V_{hull}$ | **Curated.** 3D length density of non-sprout vasculature. |
 | `sprouts_per_vessel_length` | $\mu m^{-1}$ | $N_{sprout}/L_{total}$ | Sprouting intensity per unit vessel length. **Excluded from curated panel** as largely captured by the per-hull-volume densities. |
 | `junctions_per_vessel_length` | $\mu m^{-1}$ | $N_{junction}/L_{total}$ | Branching intensity per unit vessel length. **Excluded from curated panel** as largely captured by the per-hull-volume densities. |
 | `sprouts_per_hull_volume` | $\mu m^{-3}$ | $N_{sprout}/V_{hull}$ | **Curated.** Sprout density per unit envelope volume. |
 | `junctions_per_hull_volume` | $\mu m^{-3}$ | $N_{junction}/V_{hull}$ | **Curated.** Junction density per unit envelope volume. |
-| `branches_per_hull_volume` | $\mu m^{-3}$ | $N_{branch}/V_{hull}$ | **Curated.** Non-sprout edge density per unit envelope volume. |
+| `branches_per_hull_volume` | $\mu m^{-3}$ | $N_{branch}/V_{hull}$ | **Curated.** Non-sprout edge density per unit envelope volume, counted on the **branch-only graph** (sprout-bearing intermediate junctions dissolved). |
 | `floating_sprouts_per_hull_volume` | $\mu m^{-3}$ | (Number of all-sprout connected components)$/V_{hull}$ | Density of fully-detached sprout fragments — components of the cleaned graph all of whose nodes are degree-1 tips (i.e. vessel pieces with no junction). May reflect either real biological detachments or segmentation noise. **Excluded from curated panel.** See *Floating sprouts* below. |
 | `skeleton_fractal_dimension` | unitless | Box-counting slope of the cleaned graph-derived skeleton mask. | **Curated.** Geometric complexity of the centerline network. |
 | `skeleton_lacunarity` | unitless | Gap/heterogeneity statistic on the same skeleton mask. | **Curated.** Spatial patchiness / unevenness of the centerline network. |
@@ -331,7 +348,7 @@ The columns below are emitted directly by the pipeline (they are the
 | `median_internal_pore_area` | $\mu m^2$ | Median valid pore area across detected slice-wise pores. | Typical pore size. **Excluded from curated panel** (see exclusions section). |
 | `spread_internal_pore_area` | $\mu m^2$ | Spread $P90 - P10$ of pore area. | Heterogeneity of pore size. **Excluded from curated panel.** |
 | `total_number_of_sprouts` | count | $N_{sprout}$. | Raw sprout count. **Excluded from curated panel** (FOV-dependent). |
-| `total_number_of_branches` | count | Number of non-sprout edges. | Raw branch count. **Excluded.** |
+| `total_number_of_branches` | count | Number of edges in the **branch-only graph** (cleaned graph with every sprout node removed and degree-2 mid-nodes collapsed). A vessel ``A — J — B`` with a tip off ``J`` is counted as one branch, not two. | Raw branch count. **Excluded.** |
 | `total_number_of_junctions` | count | $N_{junction}$. | Raw junction count. **Excluded.** |
 | `total_number_of_edges` | count | Total number of edges in the cleaned graph. | Raw edge count. **Excluded.** |
 | `total_number_of_nodes` | count | Total number of nodes in the cleaned graph. | Raw node count. **Excluded.** |
