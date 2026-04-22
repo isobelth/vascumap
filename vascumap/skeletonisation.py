@@ -553,6 +553,66 @@ def compute_all_morphological_params(global_metrics, branch_metrics_df, junction
 
 
 # ---------------------------------------------------------------------------
+# Curated, shape-invariant analysis-metrics panel (PCA / clustering)
+# ---------------------------------------------------------------------------
+
+# Curated subset of `all_morphological_params_df` chosen to be:
+#   1. Shape-invariant (no field-of-view-dependent quantities)
+#   2. Biologically interpretable
+#   3. Small enough for PCA / clustering with modest sample sizes
+#
+# Every column listed here MUST also appear in the full
+# `all_morphological_params_df`, so the curated panel is a strict subset of
+# the full audit file. See `vascumap/Analysis_README.md` for the per-feature
+# mathematical and biological description.
+ANALYSIS_METRICS_COLUMNS = [
+    # Density (4)
+    'vessel_volume_fraction',
+    'vessel_length_per_chip_volume_um_inverse2',
+    'sprouts_per_vessel_length_um_inverse',
+    'junctions_per_vessel_length_um_inverse',
+    # Topology (2)
+    'skeleton_fractal_dimension',
+    'skeleton_lacunarity',
+    # Branch geometry — combined sprouts + branches (4)
+    'median_sprout_and_branch_length_um',
+    'p90_minus_p10_sprout_and_branch_length_um',
+    'median_sprout_and_branch_median_cs_area_um2',
+    'p90_minus_p10_sprout_and_branch_median_cs_area_um2',
+    # Tortuosity — branch-only (2)
+    'median_branch_tortuosity',
+    'std_branch_tortuosity',
+    # Sprouting — sprouts-only (1)
+    'median_sprout_length_um',
+    # Junction connectivity (2)
+    'median_junction_degree',
+    'std_junction_degree',
+    # Orientation — combined sprouts + branches (2)
+    'median_sprout_and_branch_orientation_deg',
+    'p90_minus_p10_sprout_and_branch_orientation_deg',
+    # Spacing (2)
+    'median_junction_dist_nearest_junction_um',
+    'median_sprout_dist_nearest_endpoint_um',
+]
+
+
+def build_curated_analysis_metrics_df(all_params_df):
+    """Return a single-row DataFrame containing the curated PCA/clustering panel.
+
+    Selects `ANALYSIS_METRICS_COLUMNS` from `all_params_df`. Any missing
+    column (e.g. for an empty graph) is filled with NaN so the schema is
+    stable across images.
+    """
+    if all_params_df is None or all_params_df.empty:
+        return pd.DataFrame([{c: np.nan for c in ANALYSIS_METRICS_COLUMNS}])
+
+    row = {}
+    for col in ANALYSIS_METRICS_COLUMNS:
+        row[col] = all_params_df[col].iloc[0] if col in all_params_df.columns else np.nan
+    return pd.DataFrame([row])
+
+
+# ---------------------------------------------------------------------------
 # Network headline metrics
 # ---------------------------------------------------------------------------
 
@@ -1197,6 +1257,9 @@ def clean_and_analyse(
         global_metrics, branch_metrics_df, junction_metrics_df,
     )
 
+    # ---- curated, shape-invariant analysis-metrics panel (PCA / clustering) ----
+    analysis_metrics_df = build_curated_analysis_metrics_df(all_morphological_params_df)
+
     global_metrics_df = pd.DataFrame([global_metrics])
     return {
         'global_metrics': global_metrics,
@@ -1204,6 +1267,7 @@ def clean_and_analyse(
         'branch_metrics_df': branch_metrics_df,
         'junction_metrics_df': junction_metrics_df,
         'all_morphological_params_df': all_morphological_params_df,
+        'analysis_metrics_df': analysis_metrics_df,
         'voxel_size_um': voxel_size_um,
         'chunk_size': chunk_size,
         'clean_segmentation': clean_segmentation,

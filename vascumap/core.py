@@ -542,7 +542,7 @@ class VascuMap:
         ar = self.analysis_results
         src = Path(self.image_source_path) if self.image_source_path else None
 
-        metrics_df = ar['global_metrics_df'].copy()
+        metrics_df = ar['analysis_metrics_df'].copy()
         metrics_df.insert(0, 'image_name', name_prefix)
         metrics_df.insert(1, 'source_file', src.name if src else '')
         metrics_df.insert(2, 'image_index', int(self.image_index))
