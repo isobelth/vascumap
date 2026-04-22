@@ -14,7 +14,7 @@ from skimage.morphology import skeletonize as skeletonize_3d
 import sknw
 import networkx as nx
 from scipy.spatial.distance import cdist
-from scipy.spatial import ConvexHull
+from scipy.spatial import ConvexHull, Delaunay
 from scipy.ndimage import distance_transform_edt as edt
 from scipy import ndimage as ndi
 from scipy.ndimage import maximum_filter
@@ -1150,11 +1150,45 @@ def clean_and_analyse(
     vessel_volume_um3 = float(np.count_nonzero(clean_segmentation)) * voxel_volume_um3
 
     # ---- convex hull volume of segmented region ----
+    # The convex hull is the geometric envelope of the vessel point cloud.
+    # If an exclusion region (e.g. an organoid) sits inside that envelope,
+    # its volume must be subtracted so it is not counted as available
+    # space in `vessel_volume_fraction = V_vessel / V_hull` or in any
+    # `*_per_chip_volume*` density that divides by `V_hull`.
     seg_pts = np.argwhere(clean_segmentation > 0)
     if len(seg_pts) >= 4:
         try:
-            hull = ConvexHull(seg_pts * voxel_size_um[None, :])
+            seg_pts_um = seg_pts * voxel_size_um[None, :]
+            hull = ConvexHull(seg_pts_um)
             convex_hull_volume_um3 = hull.volume
+
+            if exclusion_mask_xy is not None and np.any(exclusion_mask_xy):
+                # Volume of the (z-extruded) exclusion region that falls
+                # *inside* the convex hull. Prefilter to the hull's bbox so
+                # find_simplex only runs on candidate voxels.
+                hull_min_um = seg_pts_um[hull.vertices].min(axis=0)
+                hull_max_um = seg_pts_um[hull.vertices].max(axis=0)
+                z_um_full = np.arange(vasculature_segmentation.shape[0]) * voxel_size_um[0]
+                z_in = np.where((z_um_full >= hull_min_um[0]) & (z_um_full <= hull_max_um[0]))[0]
+                ys, xs = np.where(exclusion_mask_xy)
+                y_um = ys * voxel_size_um[1]
+                x_um = xs * voxel_size_um[2]
+                xy_in = np.where(
+                    (y_um >= hull_min_um[1]) & (y_um <= hull_max_um[1])
+                    & (x_um >= hull_min_um[2]) & (x_um <= hull_max_um[2])
+                )[0]
+                if z_in.size and xy_in.size:
+                    hull_delaunay = Delaunay(seg_pts_um[hull.vertices])
+                    z_rep = np.repeat(z_in, xy_in.size)
+                    y_rep = np.tile(ys[xy_in], z_in.size)
+                    x_rep = np.tile(xs[xy_in], z_in.size)
+                    excl_coords_um = np.stack([z_rep, y_rep, x_rep], axis=1).astype(float) \
+                        * voxel_size_um[None, :]
+                    inside = hull_delaunay.find_simplex(excl_coords_um) >= 0
+                    excluded_inside_hull_um3 = float(np.count_nonzero(inside)) * voxel_volume_um3
+                    convex_hull_volume_um3 = max(
+                        convex_hull_volume_um3 - excluded_inside_hull_um3, 0.0,
+                    )
         except Exception:
             convex_hull_volume_um3 = chip_volume_um3
     else:

@@ -38,10 +38,17 @@ is `(2, 2, 2) µm`.
 
 Symbols used throughout:
 
-- $V_{chip}$: chip / imaged volume in $\mu m^3$.
+- $V_{chip}$: chip / imaged volume in $\mu m^3$. When an exclusion region
+  (e.g. an organoid) is supplied, its z-extruded volume is **subtracted**
+  from $V_{chip}$ so it does not count as available space.
 - $V_{hull}$: convex-hull volume of the segmented vasculature in $\mu m^3$.
+  When an exclusion region is supplied, the portion of that exclusion
+  region that falls **inside** the hull is also subtracted (see
+  *Convex hull and exclusion regions* below). In symbols:
+  $V_{hull} = V_{hull,\,raw} - V_{exclusion \cap hull}$.
 - $V_{vessel}$: total vessel volume (number of vessel-positive voxels times
-  voxel volume) in $\mu m^3$.
+  voxel volume) in $\mu m^3$. The exclusion region is zeroed in the
+  segmentation before this is counted, so excluded voxels never contribute.
 - $L_{total}$: total centerline length, summed over all graph edges, in
   $\mu m$.
 - $N_{junction}$: number of non-sprout graph nodes (i.e. branch points).
@@ -84,7 +91,7 @@ rules:
 
 | Column | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|
-| `vessel_volume_fraction` | $V_{vessel}/V_{hull}$ | The fraction of the convex hull around the vasculature that is actually filled with vessel tissue. A global readout of how densely vascularised the sample is, regardless of how big the imaged region was. | Ratio of two volumes. |
+| `vessel_volume_fraction` | $V_{vessel}/V_{hull}$ | The fraction of the convex hull around the vasculature that is actually filled with vessel tissue. A global readout of how densely vascularised the sample is, regardless of how big the imaged region was. **Excluded organoid volume is subtracted from the denominator** so the fraction reflects only the gel/ECM space available for vessels. | Ratio of two volumes, both intrinsic to the sample. |
 | `vessel_length_per_chip_volume_um_inverse2` | $L_{total}/V_{chip}$ | Total amount of vessel "wire" per unit imaged volume. Captures how packed the network is, independent of vessel thickness. Higher means more, finer, or both — denser plumbing. | Length divided by volume → intensive (does not scale with FOV). |
 | `sprouts_per_vessel_length_um_inverse` | $N_{sprout}/L_{total}$ | How frequently you encounter a sprout (a tip) per micron of vessel. A direct readout of **angiogenic sprouting intensity** normalised to network size — high values indicate an actively sprouting vasculature. | Count per unit length. |
 | `junctions_per_vessel_length_um_inverse` | $N_{junction}/L_{total}$ | How frequently you encounter a branch point per micron of vessel. A direct readout of **branching intensity** independent of how much vessel you imaged. | Count per unit length. |
@@ -330,6 +337,43 @@ features are kept in the full audit CSV but excluded from the curated
 panel.
 
   <img src="README_images/holes.png" width="25%" />
+
+### Convex hull and exclusion regions
+
+When the pipeline is given an `exclusion_mask_xy` (e.g. an organoid mask),
+it is treated as **unavailable space** at every step that involves a
+denominator volume:
+
+1. The exclusion region is z-extruded to a 3D mask and **zeroed in the
+   segmentation** before any vessel statistics are computed.
+2. Its z-extruded volume is **subtracted from $V_{chip}$**.
+3. For $V_{hull}$, we first compute the geometric convex hull of the vessel
+   point cloud (which has organoid voxels already zeroed), then test which
+   voxels of the z-extruded exclusion region fall *inside* that hull and
+   subtract their volume:
+
+$$V_{hull} \; = \; V_{hull,\,raw} \; - \; V_{exclusion \,\cap\, hull}.$$
+
+This matters because an organoid that sits *inside* the vascular envelope
+would otherwise inflate the denominator of `vessel_volume_fraction` and
+`vessel_length_per_chip_volume_um_inverse2`, biasing them downward in
+proportion to the organoid size. With the correction in place,
+`vessel_volume_fraction = V_{vessel}/(V_{gel \cap hull})` — exactly the
+biologically meaningful quantity "fraction of the gel space inside the
+vascular envelope that is occupied by vessels".
+
+If no exclusion mask is supplied, $V_{hull}$ reduces to the raw convex-hull
+volume.
+
+**Implementation note (performance).** The inside/outside test uses a
+`scipy.spatial.Delaunay` triangulation of the hull vertices and is
+vectorised over all candidate exclusion voxels. To keep the cost low on
+large fields of view, the exclusion voxels are first prefiltered by the
+hull's axis-aligned bounding box, so only voxels that *could* lie inside
+the hull are passed to the inside-test. On a realistic
+$60 \times 1024 \times 1024$ image with a $\sim 5\,$M-voxel z-extruded
+organoid, the entire correction adds well under a second on top of the
+underlying `ConvexHull` computation that the pipeline already performs.
 
 ### Distance convention
 
