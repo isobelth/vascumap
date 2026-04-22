@@ -354,28 +354,28 @@ def compute_branch_metrics_df(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), 
                 'node_start': int(u),
                 'node_end': int(v),
                 'is_sprout': bool(graph.nodes[u].get('sprout', False) or graph.nodes[v].get('sprout', False)),
-                'start_z': int(pts[0, 0]),
-                'start_y': int(pts[0, 1]),
-                'start_x': int(pts[0, 2]),
-                'end_z': int(pts[-1, 0]),
-                'end_y': int(pts[-1, 1]),
-                'end_x': int(pts[-1, 2]),
-                'start_z_um': float(pts_um[0, 0]),
-                'start_y_um': float(pts_um[0, 1]),
-                'start_x_um': float(pts_um[0, 2]),
-                'end_z_um': float(pts_um[-1, 0]),
-                'end_y_um': float(pts_um[-1, 1]),
-                'end_x_um': float(pts_um[-1, 2]),
-                'path_length_um': path_length_um,
-                'endpoint_distance_um': endpoint_distance_um,
+                'start_z_idx': int(pts[0, 0]),
+                'start_y_idx': int(pts[0, 1]),
+                'start_x_idx': int(pts[0, 2]),
+                'end_z_idx': int(pts[-1, 0]),
+                'end_y_idx': int(pts[-1, 1]),
+                'end_x_idx': int(pts[-1, 2]),
+                'start_z': float(pts_um[0, 0]),
+                'start_y': float(pts_um[0, 1]),
+                'start_x': float(pts_um[0, 2]),
+                'end_z': float(pts_um[-1, 0]),
+                'end_y': float(pts_um[-1, 1]),
+                'end_x': float(pts_um[-1, 2]),
+                'path_length': path_length_um,
+                'endpoint_distance': endpoint_distance_um,
                 'tortuosity': tortuosity,
-                'mean_cs_area_um2': mean_cs_area_um2,
-                'median_cs_area_um2': median_cs_area_um2,
-                'std_cs_area_um2': std_cs_area_um2,
-                'mean_width_um': mean_width_um,
-                'median_width_um': median_width_um,
-                'branch_volume_um3': branch_volume_um3,
-                'orientation_to_device_axis_deg': orientation_to_device_axis_deg(pts_um, device_axis=device_axis),
+                'mean_cs_area': mean_cs_area_um2,
+                'median_cs_area': median_cs_area_um2,
+                'std_cs_area': std_cs_area_um2,
+                'mean_width': mean_width_um,
+                'median_width': median_width_um,
+                'branch_volume': branch_volume_um3,
+                'orientation_to_device_axis': orientation_to_device_axis_deg(pts_um, device_axis=device_axis),
             }
             rows.append(row)
         except (KeyError, IndexError, ValueError):
@@ -384,12 +384,12 @@ def compute_branch_metrics_df(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), 
     if not rows:
         return pd.DataFrame(columns=[
             'node_start', 'node_end', 'is_sprout',
+            'start_z_idx', 'start_y_idx', 'start_x_idx', 'end_z_idx', 'end_y_idx', 'end_x_idx',
             'start_z', 'start_y', 'start_x', 'end_z', 'end_y', 'end_x',
-            'start_z_um', 'start_y_um', 'start_x_um', 'end_z_um', 'end_y_um', 'end_x_um',
-            'path_length_um', 'endpoint_distance_um', 'tortuosity',
-            'mean_cs_area_um2', 'median_cs_area_um2', 'std_cs_area_um2',
-            'mean_width_um', 'median_width_um', 'branch_volume_um3',
-            'orientation_to_device_axis_deg',
+            'path_length', 'endpoint_distance', 'tortuosity',
+            'mean_cs_area', 'median_cs_area', 'std_cs_area',
+            'mean_width', 'median_width', 'branch_volume',
+            'orientation_to_device_axis',
         ])
     return pd.DataFrame(rows)
 
@@ -406,9 +406,9 @@ def compute_junction_metrics_df(graph, voxel_size_um=(2.0, 2.0, 2.0), distance_t
     """
     voxel_size_um = np.asarray(voxel_size_um, dtype=float)
     empty_cols = [
-        'node_id', 'z_um', 'y_um', 'x_um',
+        'node_id', 'z', 'y', 'x',
         'degree', 'is_sprout_tip', 'is_junction',
-        'dist_nearest_junction_um', 'dist_nearest_endpoint_um',
+        'dist_nearest_junction', 'dist_nearest_endpoint',
         'num_junction_neighbors', 'num_endpoint_neighbors',
     ]
     nodes = list(graph.nodes())
@@ -469,14 +469,14 @@ def compute_junction_metrics_df(graph, voxel_size_um=(2.0, 2.0, 2.0), distance_t
 
     return pd.DataFrame({
         'node_id': nodes,
-        'z_um': positions_um[:, 0],
-        'y_um': positions_um[:, 1],
-        'x_um': positions_um[:, 2],
+        'z': positions_um[:, 0],
+        'y': positions_um[:, 1],
+        'x': positions_um[:, 2],
         'degree': degrees,
         'is_sprout_tip': is_sprout_tip,
         'is_junction': is_junction,
-        'dist_nearest_junction_um': dist_nearest_junction,
-        'dist_nearest_endpoint_um': dist_nearest_endpoint,
+        'dist_nearest_junction': dist_nearest_junction,
+        'dist_nearest_endpoint': dist_nearest_endpoint,
         'num_junction_neighbors': num_junction_neighbors,
         'num_endpoint_neighbors': num_endpoint_neighbors,
     })
@@ -500,16 +500,16 @@ def compute_all_morphological_params(global_metrics, branch_metrics_df, junction
         is_sprout = branch_metrics_df['is_sprout'].values
 
         vessel_agg_columns = {
-            'volume_um3': 'branch_volume_um3',
-            'length_um': 'path_length_um',
-            'endpoint_distance_um': 'endpoint_distance_um',
+            'volume': 'branch_volume',
+            'length': 'path_length',
+            'endpoint_distance': 'endpoint_distance',
             'tortuosity': 'tortuosity',
-            'mean_cs_area_um2': 'mean_cs_area_um2',
-            'median_cs_area_um2': 'median_cs_area_um2',
-            'std_cs_area_um2': 'std_cs_area_um2',
-            'mean_width_um': 'mean_width_um',
-            'median_width_um': 'median_width_um',
-            'orientation_deg': 'orientation_to_device_axis_deg',
+            'mean_cs_area': 'mean_cs_area',
+            'median_cs_area': 'median_cs_area',
+            'std_cs_area': 'std_cs_area',
+            'mean_width': 'mean_width',
+            'median_width': 'median_width',
+            'orientation': 'orientation_to_device_axis',
         }
 
         for param_name, col_name in vessel_agg_columns.items():
@@ -523,7 +523,7 @@ def compute_all_morphological_params(global_metrics, branch_metrics_df, junction
                 ('mean', np.nanmean),
                 ('std', np.nanstd),
                 ('median', np.nanmedian),
-                ('p90_minus_p10', safe_percentile_spread),
+                ('spread', safe_percentile_spread),
             ]:
                 params[f'{agg}_branch_{param_name}'] = float(fn(branch_vals)) if len(branch_vals) > 0 else np.nan
                 params[f'{agg}_sprout_{param_name}'] = float(fn(sprout_vals)) if len(sprout_vals) > 0 else np.nan
@@ -536,8 +536,8 @@ def compute_all_morphological_params(global_metrics, branch_metrics_df, junction
 
         junction_agg_columns = [
             'degree',
-            'dist_nearest_junction_um',
-            'dist_nearest_endpoint_um',
+            'dist_nearest_junction',
+            'dist_nearest_endpoint',
             'num_junction_neighbors',
             'num_endpoint_neighbors',
         ]
@@ -553,7 +553,7 @@ def compute_all_morphological_params(global_metrics, branch_metrics_df, junction
                 ('mean', np.nanmean),
                 ('std', np.nanstd),
                 ('median', np.nanmedian),
-                ('p90_minus_p10', safe_percentile_spread),
+                ('spread', safe_percentile_spread),
             ]:
                 params[f'{agg}_junction_{col_name}'] = float(fn(junc_vals)) if len(junc_vals) > 0 else np.nan
                 params[f'{agg}_sprout_tip_{col_name}'] = float(fn(tip_vals)) if len(tip_vals) > 0 else np.nan
@@ -576,36 +576,29 @@ def compute_all_morphological_params(global_metrics, branch_metrics_df, junction
 # the full audit file. See `vascumap/Analysis_README.md` for the per-feature
 # mathematical and biological description.
 ANALYSIS_METRICS_COLUMNS = [
-    # Density (7)
+    # Density (5)
     'vessel_volume_fraction',
-    'branch_length_per_hull_volume_um_inverse2',
-    'sprouts_per_vessel_length_um_inverse',
-    'junctions_per_vessel_length_um_inverse',
-    'sprouts_per_hull_volume_um_inverse3',
-    'junctions_per_hull_volume_um_inverse3',
-    'branches_per_hull_volume_um_inverse3',
+    'branch_length_per_hull_volume',
+    'sprouts_per_hull_volume',
+    'junctions_per_hull_volume',
+    'branches_per_hull_volume',
     # Topology (2)
     'skeleton_fractal_dimension',
     'skeleton_lacunarity',
     # Branch geometry — branches only (4)
-    'median_branch_length_um',
-    'p90_minus_p10_branch_length_um',
-    'median_branch_median_cs_area_um2',
-    'p90_minus_p10_branch_median_cs_area_um2',
-    # Branch geometry — sprouts only (4)
-    'median_sprout_length_um',
-    'p90_minus_p10_sprout_length_um',
-    'median_sprout_median_cs_area_um2',
-    'p90_minus_p10_sprout_median_cs_area_um2',
+    'median_branch_length',
+    'spread_branch_length',
+    'median_branch_median_cs_area',
+    'spread_branch_median_cs_area',
     # Tortuosity — branch-only (2)
     'median_branch_tortuosity',
-    'p90_minus_p10_branch_tortuosity',
+    'spread_branch_tortuosity',
     # Junction connectivity (2)
     'median_junction_degree',
-    'p90_minus_p10_junction_degree',
+    'spread_junction_degree',
     # Orientation — combined sprouts + branches (2)
-    'median_sprout_and_branch_orientation_deg',
-    'p90_minus_p10_sprout_and_branch_orientation_deg',
+    'median_sprout_and_branch_orientation',
+    'spread_sprout_and_branch_orientation',
 ]
 
 
@@ -642,16 +635,16 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
     if mode_tag not in ('skeleton', 'euclidean'):
         mode_tag = 'skeleton'
     summary = {
-        'median_sprout_and_branch_orientation_deg': np.nan,
-        'p90_minus_p10_sprout_and_branch_orientation_deg': np.nan,
-        'median_sprout_and_branch_median_cs_area_um2': np.nan,
-        'p90_minus_p10_sprout_and_branch_median_cs_area_um2': np.nan,
-        'median_sprout_and_branch_length_um': np.nan,
-        'p90_minus_p10_sprout_and_branch_length_um': np.nan,
-        f'median_junction_{mode_tag}_dist_nearest_junction_um': np.nan,
-        f'p90_minus_p10_junction_{mode_tag}_dist_nearest_junction_um': np.nan,
-        f'median_sprout_{mode_tag}_dist_nearest_endpoint_um': np.nan,
-        f'p90_minus_p10_sprout_{mode_tag}_dist_nearest_endpoint_um': np.nan,
+        'median_sprout_and_branch_orientation': np.nan,
+        'spread_sprout_and_branch_orientation': np.nan,
+        'median_sprout_and_branch_median_cs_area': np.nan,
+        'spread_sprout_and_branch_median_cs_area': np.nan,
+        'median_sprout_and_branch_length': np.nan,
+        'spread_sprout_and_branch_length': np.nan,
+        f'median_junction_{mode_tag}_dist_nearest_junction': np.nan,
+        f'spread_junction_{mode_tag}_dist_nearest_junction': np.nan,
+        f'median_sprout_{mode_tag}_dist_nearest_endpoint': np.nan,
+        f'spread_sprout_{mode_tag}_dist_nearest_endpoint': np.nan,
     }
 
     orientations_deg = []
@@ -673,14 +666,14 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
             continue
 
     if len(orientations_deg) > 0:
-        summary['median_sprout_and_branch_orientation_deg'] = safe_median(orientations_deg)
-        summary['p90_minus_p10_sprout_and_branch_orientation_deg'] = safe_percentile_spread(orientations_deg)
+        summary['median_sprout_and_branch_orientation'] = safe_median(orientations_deg)
+        summary['spread_sprout_and_branch_orientation'] = safe_percentile_spread(orientations_deg)
     if len(median_cs_areas) > 0:
-        summary['median_sprout_and_branch_median_cs_area_um2'] = safe_median(median_cs_areas)
-        summary['p90_minus_p10_sprout_and_branch_median_cs_area_um2'] = safe_percentile_spread(median_cs_areas)
+        summary['median_sprout_and_branch_median_cs_area'] = safe_median(median_cs_areas)
+        summary['spread_sprout_and_branch_median_cs_area'] = safe_percentile_spread(median_cs_areas)
     if len(branch_lengths) > 0:
-        summary['median_sprout_and_branch_length_um'] = safe_median(branch_lengths)
-        summary['p90_minus_p10_sprout_and_branch_length_um'] = safe_percentile_spread(branch_lengths)
+        summary['median_sprout_and_branch_length'] = safe_median(branch_lengths)
+        summary['spread_sprout_and_branch_length'] = safe_percentile_spread(branch_lengths)
 
     nodes = list(graph.nodes())
     if len(nodes) < 2:
@@ -741,12 +734,12 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
         sprout_nearest   = _nearest_euclidean(pos_sprout)
 
     if junction_nearest:
-        summary[f'median_junction_{mode_tag}_dist_nearest_junction_um'] = safe_median(junction_nearest)
-        summary[f'p90_minus_p10_junction_{mode_tag}_dist_nearest_junction_um'] = safe_percentile_spread(junction_nearest)
+        summary[f'median_junction_{mode_tag}_dist_nearest_junction'] = safe_median(junction_nearest)
+        summary[f'spread_junction_{mode_tag}_dist_nearest_junction'] = safe_percentile_spread(junction_nearest)
 
     if sprout_nearest:
-        summary[f'median_sprout_{mode_tag}_dist_nearest_endpoint_um'] = safe_median(sprout_nearest)
-        summary[f'p90_minus_p10_sprout_{mode_tag}_dist_nearest_endpoint_um'] = safe_percentile_spread(sprout_nearest)
+        summary[f'median_sprout_{mode_tag}_dist_nearest_endpoint'] = safe_median(sprout_nearest)
+        summary[f'spread_sprout_{mode_tag}_dist_nearest_endpoint'] = safe_percentile_spread(sprout_nearest)
 
     return summary
 
@@ -816,8 +809,8 @@ def compute_internal_pore_headline_metrics(
 
     if not pore_slice_data:
         return {
-            'median_internal_pore_area_um2': np.nan,
-            'p90_minus_p10_internal_pore_area_um2': np.nan,
+            'median_internal_pore_area': np.nan,
+            'spread_internal_pore_area': np.nan,
         }
 
     # ── GPU batch EDT ──────────────────────────────────────────────────────
@@ -851,8 +844,8 @@ def compute_internal_pore_headline_metrics(
     all_radii = np.concatenate(pore_radii_all)
 
     return {
-        'median_internal_pore_area_um2': float(np.median(all_areas)),
-        'p90_minus_p10_internal_pore_area_um2': float(np.percentile(all_areas, 90) - np.percentile(all_areas, 10)),
+        'median_internal_pore_area': float(np.median(all_areas)),
+        'spread_internal_pore_area': float(np.percentile(all_areas, 90) - np.percentile(all_areas, 10)),
     }
 
 
@@ -1259,30 +1252,30 @@ def clean_and_analyse(
         branches_count = 0
         floating_sprouts_count = 0
 
-    global_metrics['chip_volume_um3'] = chip_volume_um3
-    global_metrics['convex_hull_volume_um3'] = convex_hull_volume_um3
-    global_metrics['vessel_volume_um3'] = vessel_volume_um3
+    global_metrics['chip_volume'] = chip_volume_um3
+    global_metrics['convex_hull_volume'] = convex_hull_volume_um3
+    global_metrics['vessel_volume'] = vessel_volume_um3
     global_metrics['vessel_volume_fraction'] = safe_divide(vessel_volume_um3, convex_hull_volume_um3)
-    global_metrics['total_vessel_length_um'] = float(total_vessel_length_um)
-    global_metrics['total_branch_length_um'] = float(total_branch_length_um)
+    global_metrics['total_vessel_length'] = float(total_vessel_length_um)
+    global_metrics['total_branch_length'] = float(total_branch_length_um)
     # Length-density: branch-only length per hull volume (sprouts excluded).
-    global_metrics['branch_length_per_hull_volume_um_inverse2'] = safe_divide(
+    global_metrics['branch_length_per_hull_volume'] = safe_divide(
         total_branch_length_um, convex_hull_volume_um3,
     )
-    global_metrics['sprouts_per_vessel_length_um_inverse'] = safe_divide(sprouts_count, total_vessel_length_um)
-    global_metrics['junctions_per_vessel_length_um_inverse'] = safe_divide(branchpoints_count, total_vessel_length_um)
+    global_metrics['sprouts_per_vessel_length'] = safe_divide(sprouts_count, total_vessel_length_um)
+    global_metrics['junctions_per_vessel_length'] = safe_divide(branchpoints_count, total_vessel_length_um)
     global_metrics['skeleton_fractal_dimension'] = fd
     global_metrics['skeleton_lacunarity'] = lacunarity
-    global_metrics['median_sprout_and_branch_orientation_deg'] = np.nan
-    global_metrics['p90_minus_p10_sprout_and_branch_orientation_deg'] = np.nan
-    global_metrics['median_sprout_and_branch_median_cs_area_um2'] = np.nan
-    global_metrics['p90_minus_p10_sprout_and_branch_median_cs_area_um2'] = np.nan
-    global_metrics['median_sprout_and_branch_length_um'] = np.nan
-    global_metrics['p90_minus_p10_sprout_and_branch_length_um'] = np.nan
-    global_metrics['median_junction_skeleton_dist_nearest_junction_um'] = np.nan
-    global_metrics['p90_minus_p10_junction_skeleton_dist_nearest_junction_um'] = np.nan
-    global_metrics['median_sprout_skeleton_dist_nearest_endpoint_um'] = np.nan
-    global_metrics['p90_minus_p10_sprout_skeleton_dist_nearest_endpoint_um'] = np.nan
+    global_metrics['median_sprout_and_branch_orientation'] = np.nan
+    global_metrics['spread_sprout_and_branch_orientation'] = np.nan
+    global_metrics['median_sprout_and_branch_median_cs_area'] = np.nan
+    global_metrics['spread_sprout_and_branch_median_cs_area'] = np.nan
+    global_metrics['median_sprout_and_branch_length'] = np.nan
+    global_metrics['spread_sprout_and_branch_length'] = np.nan
+    global_metrics['median_junction_skeleton_dist_nearest_junction'] = np.nan
+    global_metrics['spread_junction_skeleton_dist_nearest_junction'] = np.nan
+    global_metrics['median_sprout_skeleton_dist_nearest_endpoint'] = np.nan
+    global_metrics['spread_sprout_skeleton_dist_nearest_endpoint'] = np.nan
 
     branch_metrics_df = compute_branch_metrics_df(
         clean_graph,
@@ -1302,8 +1295,8 @@ def clean_and_analyse(
             )
         )
 
-    global_metrics['average_vessel_volume_um3'] = (
-        float(np.nanmean(branch_metrics_df['branch_volume_um3'].to_numpy(dtype=float)))
+    global_metrics['average_vessel_volume'] = (
+        float(np.nanmean(branch_metrics_df['branch_volume'].to_numpy(dtype=float)))
         if not branch_metrics_df.empty
         else np.nan
     )
@@ -1319,10 +1312,10 @@ def clean_and_analyse(
     global_metrics.update(pore_global_metrics)
 
     # ---- extra density metrics (per hull volume) ----
-    global_metrics['sprouts_per_hull_volume_um_inverse3'] = safe_divide(sprouts_count, convex_hull_volume_um3)
-    global_metrics['junctions_per_hull_volume_um_inverse3'] = safe_divide(branchpoints_count, convex_hull_volume_um3)
-    global_metrics['branches_per_hull_volume_um_inverse3'] = safe_divide(branches_count, convex_hull_volume_um3)
-    global_metrics['floating_sprouts_per_hull_volume_um_inverse3'] = safe_divide(
+    global_metrics['sprouts_per_hull_volume'] = safe_divide(sprouts_count, convex_hull_volume_um3)
+    global_metrics['junctions_per_hull_volume'] = safe_divide(branchpoints_count, convex_hull_volume_um3)
+    global_metrics['branches_per_hull_volume'] = safe_divide(branches_count, convex_hull_volume_um3)
+    global_metrics['floating_sprouts_per_hull_volume'] = safe_divide(
         floating_sprouts_count, convex_hull_volume_um3,
     )
 
