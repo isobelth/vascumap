@@ -164,7 +164,7 @@ def plot_orientation_kde(branch_df, condition_colors, conditions=None, save_dir=
     plt.show()
 
 
-def pca_plots(combined_analysis_metrics, condition_colors, save_dir=None):
+def pca_plots(combined_analysis_metrics, condition_colors, save_dir=None, save_type="png"):
     """PCA scatter, volcano/importance-significance plot, and top-features bar chart.
 
     Uses PCA loadings (weighted by explained variance) for feature importance,
@@ -299,7 +299,7 @@ def pca_plots(combined_analysis_metrics, condition_colors, save_dir=None):
     ax2.tick_params(axis="y", labelsize=9)
 
     if save_dir is not None:
-        fig.savefig(Path(save_dir) / "pca_plots.png", dpi=150)
+        fig.savefig(Path(save_dir) / f"pca_plots.{save_type}", dpi=150)
     plt.show()
 
     if len(sig_features) == 0:
