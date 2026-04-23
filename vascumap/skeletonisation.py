@@ -171,6 +171,38 @@ def remove_mid_node(graph):
     return graph
 
 
+def classify_sprout_edges(graph):
+    """Classify every edge of *graph* as ``'branch'``, ``'attached_sprout'``
+    or ``'floating_sprout'``.
+
+    A **floating sprout** is, by definition, an edge belonging to a
+    connected component of exactly two nodes, both of degree 1
+    (an isolated 2-node fragment whose only edge connects two tips).
+    An **attached sprout** is any other edge with at least one degree-1
+    endpoint (one tip dangling off the connected network). Everything
+    else is a **branch**.
+
+    Returns a dict mapping the edge tuple ``(u, v)`` (in iteration order)
+    to one of the three strings.
+    """
+    floating_nodes = set()
+    for cc in nx.connected_components(graph):
+        if len(cc) == 2:
+            a, b = list(cc)
+            if graph.degree(a) == 1 and graph.degree(b) == 1:
+                floating_nodes.update(cc)
+
+    edge_kind = {}
+    for u, v in graph.edges():
+        if u in floating_nodes and v in floating_nodes:
+            edge_kind[(u, v)] = 'floating_sprout'
+        elif graph.degree(u) == 1 or graph.degree(v) == 1:
+            edge_kind[(u, v)] = 'attached_sprout'
+        else:
+            edge_kind[(u, v)] = 'branch'
+    return edge_kind
+
+
 def build_branch_only_graph(graph):
     """Return a sprout-collapsed copy of *graph* for branch-geometry stats.
 
@@ -347,8 +379,14 @@ def orientation_to_device_axis_deg(pts_um, device_axis='x'):
 
 
 def compute_branch_metrics_df(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), device_axis='x'):
-    """Compute per-branch metrics DataFrame from a cleaned vessel graph."""
+    """Compute per-branch metrics DataFrame from a cleaned vessel graph.
+
+    Each row carries an ``edge_kind`` column with one of
+    ``'branch'``, ``'attached_sprout'``, ``'floating_sprout'``
+    (see :func:`classify_sprout_edges` for definitions).
+    """
     voxel_size_um = np.asarray(voxel_size_um, dtype=float)
+    edge_kind_lookup = classify_sprout_edges(graph)
     rows = []
 
     for u, v in graph.edges():
@@ -387,7 +425,7 @@ def compute_branch_metrics_df(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), 
             row = {
                 'node_start': int(u),
                 'node_end': int(v),
-                'is_sprout': bool(graph.nodes[u].get('sprout', False) or graph.nodes[v].get('sprout', False)),
+                'edge_kind': edge_kind_lookup.get((u, v), 'branch'),
                 'start_z_idx': int(pts[0, 0]),
                 'start_y_idx': int(pts[0, 1]),
                 'start_x_idx': int(pts[0, 2]),
@@ -417,7 +455,7 @@ def compute_branch_metrics_df(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), 
 
     if not rows:
         return pd.DataFrame(columns=[
-            'node_start', 'node_end', 'is_sprout',
+            'node_start', 'node_end', 'edge_kind',
             'start_z_idx', 'start_y_idx', 'start_x_idx', 'end_z_idx', 'end_y_idx', 'end_x_idx',
             'start_z', 'start_y', 'start_x', 'end_z', 'end_y', 'end_x',
             'path_length', 'endpoint_distance', 'tortuosity',
@@ -521,30 +559,41 @@ def compute_junction_metrics_df(graph, voxel_size_um=(2.0, 2.0, 2.0), distance_t
 # ---------------------------------------------------------------------------
 
 def compute_all_morphological_params(
-    global_metrics, branch_metrics_df, branch_only_metrics_df, junction_metrics_df,
+    global_metrics, branch_metrics_df, branch_only_metrics_df,
+    junction_metrics_df, branch_only_junction_metrics_df,
 ):
     """Build single-row DataFrame with all morphological parameters.
 
     Includes everything in the simplified CSV plus full disaggregated
-    statistics: mean/std/median × branch/sprout/combined for vessel metrics,
-    and mean/std/median × junction/sprout_tip/combined for junction metrics.
+    statistics: mean/std/median/spread aggregates of every per-edge metric
+    over four subsets {branch, attached_sprout, floating_sprout,
+    sprout_and_branch}, and of every per-junction metric over the node
+    subsets {junction, sprout_tip, all_nodes, branch_only_junction}.
 
     Parameters
     ----------
     branch_metrics_df : pd.DataFrame
-        Per-edge metrics from the full cleaned graph (sprouts present).
-        Source for ``*_sprout_*`` and ``*_sprout_and_branch_*`` aggregates.
+        Per-edge metrics from the full cleaned graph. Carries the
+        ``edge_kind`` column used to partition into the
+        ``attached_sprout`` and ``floating_sprout`` subsets, and is the
+        source of the ``sprout_and_branch`` subset (every edge).
     branch_only_metrics_df : pd.DataFrame
-        Per-edge metrics from the sprout-collapsed graph (sprout-bearing
-        intermediate junctions dissolved). Source for ``*_branch_*``
-        aggregates so a vessel ``A — J — B`` with a tip off ``J``
-        contributes one branch rather than two.
+        Per-edge metrics from the sprout-collapsed graph. Source for the
+        ``branch`` subset so a vessel ``A — J — B`` with a tip off
+        ``J`` contributes one branch rather than two.
+    junction_metrics_df : pd.DataFrame
+        Per-node metrics on the cleaned graph (sprouts present). Source
+        for the ``junction``, ``sprout_tip`` and ``all_nodes`` aggregates.
+    branch_only_junction_metrics_df : pd.DataFrame
+        Per-node metrics on the sprout-collapsed graph. Source for the
+        ``branch_only_junction`` aggregates (e.g. branch-only junction
+        degree, ignoring sprouts entirely).
     """
     params = dict(global_metrics)
 
     # ── Per-branch disaggregated stats ────────────────────────────────────
     if branch_metrics_df is not None and not branch_metrics_df.empty:
-        is_sprout = branch_metrics_df['is_sprout'].values
+        edge_kind = branch_metrics_df['edge_kind'].to_numpy()
 
         vessel_agg_columns = {
             'volume': 'branch_volume',
@@ -564,38 +613,53 @@ def compute_all_morphological_params(
             and not branch_only_metrics_df.empty
         )
 
+        aggregators = [
+            ('mean', np.nanmean),
+            ('std', np.nanstd),
+            ('median', np.nanmedian),
+            ('spread', safe_percentile_spread),
+        ]
+
         for param_name, col_name in vessel_agg_columns.items():
             if col_name not in branch_metrics_df.columns:
                 continue
             values = branch_metrics_df[col_name].to_numpy(dtype=float)
+            attached_vals = values[edge_kind == 'attached_sprout']
+            floating_vals = values[edge_kind == 'floating_sprout']
             if have_collapsed and col_name in branch_only_metrics_df.columns:
                 branch_vals = branch_only_metrics_df[col_name].to_numpy(dtype=float)
             else:
                 branch_vals = np.asarray([], dtype=float)
-            sprout_vals = values[is_sprout]
 
-            for agg, fn in [
-                ('mean', np.nanmean),
-                ('std', np.nanstd),
-                ('median', np.nanmedian),
-                ('spread', safe_percentile_spread),
-            ]:
-                params[f'{agg}_branch_{param_name}'] = float(fn(branch_vals)) if len(branch_vals) > 0 else np.nan
-                params[f'{agg}_sprout_{param_name}'] = float(fn(sprout_vals)) if len(sprout_vals) > 0 else np.nan
-                params[f'{agg}_sprout_and_branch_{param_name}'] = float(fn(values)) if len(values) > 0 else np.nan
+            subsets = {
+                'branch': branch_vals,
+                'attached_sprout': attached_vals,
+                'floating_sprout': floating_vals,
+                'sprout_and_branch': values,
+            }
+            for agg, fn in aggregators:
+                for subset_name, subset_vals in subsets.items():
+                    key = f'{agg}_{subset_name}_{param_name}'
+                    params[key] = float(fn(subset_vals)) if len(subset_vals) > 0 else np.nan
 
     # ── Per-junction disaggregated stats ──────────────────────────────────
+    junction_agg_columns = [
+        'degree',
+        'dist_nearest_junction',
+        'dist_nearest_endpoint',
+        'num_junction_neighbors',
+        'num_endpoint_neighbors',
+    ]
+    aggregators = [
+        ('mean', np.nanmean),
+        ('std', np.nanstd),
+        ('median', np.nanmedian),
+        ('spread', safe_percentile_spread),
+    ]
+
     if junction_metrics_df is not None and not junction_metrics_df.empty:
         is_junction = junction_metrics_df['is_junction'].values
         is_sprout_tip = junction_metrics_df['is_sprout_tip'].values
-
-        junction_agg_columns = [
-            'degree',
-            'dist_nearest_junction',
-            'dist_nearest_endpoint',
-            'num_junction_neighbors',
-            'num_endpoint_neighbors',
-        ]
 
         for col_name in junction_agg_columns:
             if col_name not in junction_metrics_df.columns:
@@ -604,15 +668,24 @@ def compute_all_morphological_params(
             junc_vals = values[is_junction]
             tip_vals = values[is_sprout_tip]
 
-            for agg, fn in [
-                ('mean', np.nanmean),
-                ('std', np.nanstd),
-                ('median', np.nanmedian),
-                ('spread', safe_percentile_spread),
-            ]:
+            for agg, fn in aggregators:
                 params[f'{agg}_junction_{col_name}'] = float(fn(junc_vals)) if len(junc_vals) > 0 else np.nan
                 params[f'{agg}_sprout_tip_{col_name}'] = float(fn(tip_vals)) if len(tip_vals) > 0 else np.nan
                 params[f'{agg}_all_nodes_{col_name}'] = float(fn(values)) if len(values) > 0 else np.nan
+
+    # ── Branch-only junction stats (sprouts removed entirely) ─────────────
+    if (
+        branch_only_junction_metrics_df is not None
+        and not branch_only_junction_metrics_df.empty
+    ):
+        for col_name in junction_agg_columns:
+            if col_name not in branch_only_junction_metrics_df.columns:
+                continue
+            values = branch_only_junction_metrics_df[col_name].to_numpy(dtype=float)
+            for agg, fn in aggregators:
+                params[f'{agg}_branch_only_junction_{col_name}'] = (
+                    float(fn(values)) if len(values) > 0 else np.nan
+                )
 
     return pd.DataFrame([params])
 
@@ -634,7 +707,7 @@ ANALYSIS_METRICS_COLUMNS = [
     # Density (5)
     'vessel_volume_fraction',
     'branch_length_per_volume',
-    'sprouts_per_volume',
+    'attached_sprouts_per_volume',
     'junctions_per_volume',
     'branches_per_volume',
     # Topology (2)
@@ -648,12 +721,14 @@ ANALYSIS_METRICS_COLUMNS = [
     # Tortuosity — branch-only (2)
     'median_branch_tortuosity',
     'spread_branch_tortuosity',
-    # Junction connectivity (2)
-    'median_junction_degree',
-    'spread_junction_degree',
+    # Junction connectivity — branch-only (2)
+    'median_branch_only_junction_degree',
+    'spread_branch_only_junction_degree',
     # Orientation — combined sprouts + branches (2)
     'median_sprout_and_branch_orientation',
     'spread_sprout_and_branch_orientation',
+    # Floating sprouts — vessel retraction / detachment proxy (1)
+    'floating_sprouts_per_volume',
 ]
 
 
@@ -678,57 +753,27 @@ def build_curated_analysis_metrics_df(all_params_df):
 # ---------------------------------------------------------------------------
 
 def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), distance_mode='skeleton', device_axis='x'):
-    """Aggregate per-branch metrics into network-level headline statistics.
+    """Compute distance-based network-level headline statistics.
 
-    Distance-based summaries are emitted with a mode-tagged infix
-    (`_skeleton_dist_` or `_euclidean_dist_`) so they never collide with the
-    per-junction Euclidean disaggregated stats produced from
-    `compute_junction_metrics_df` (which use plain `dist_nearest_*` keys).
+    Per-edge aggregates (orientation / length / cross-sectional area)
+    are owned by :func:`compute_all_morphological_params`; this function
+    only emits the nearest-neighbour distance summaries, which are tagged
+    with a mode infix (``_skeleton_dist_`` or ``_euclidean_dist_``) so
+    they never collide with the per-junction Euclidean disaggregated
+    stats from :func:`compute_junction_metrics_df`. ``area_image`` is
+    accepted for backwards compatibility but unused.
     """
+    del area_image  # accepted for back-compat; orientation/length now in aggregator
     voxel_size_um = np.asarray(voxel_size_um, dtype=float)
     mode_tag = str(distance_mode).lower()
     if mode_tag not in ('skeleton', 'euclidean'):
         mode_tag = 'skeleton'
     summary = {
-        'median_sprout_and_branch_orientation': np.nan,
-        'spread_sprout_and_branch_orientation': np.nan,
-        'median_sprout_and_branch_median_cs_area': np.nan,
-        'spread_sprout_and_branch_median_cs_area': np.nan,
-        'median_sprout_and_branch_length': np.nan,
-        'spread_sprout_and_branch_length': np.nan,
         f'median_junction_{mode_tag}_dist_nearest_junction': np.nan,
         f'spread_junction_{mode_tag}_dist_nearest_junction': np.nan,
         f'median_sprout_{mode_tag}_dist_nearest_endpoint': np.nan,
         f'spread_sprout_{mode_tag}_dist_nearest_endpoint': np.nan,
     }
-
-    orientations_deg = []
-    median_cs_areas = []
-    branch_lengths = []
-    for u, v in graph.edges():
-        try:
-            pts = graph[u][v]['pts']
-            if len(pts) < 2:
-                continue
-            pts_um = np.asarray(pts, dtype=float) * voxel_size_um[None, :]
-            orientations_deg.append(orientation_to_device_axis_deg(pts_um, device_axis=device_axis))
-
-            segment_areas = area_image[pts[:, 0], pts[:, 1], pts[:, 2]]
-            median_cs_areas.append(float(np.nanmedian(segment_areas)))
-
-            branch_lengths.append(float(np.sum(np.linalg.norm(np.diff(pts_um, axis=0), axis=1))))
-        except (KeyError, IndexError):
-            continue
-
-    if len(orientations_deg) > 0:
-        summary['median_sprout_and_branch_orientation'] = safe_median(orientations_deg)
-        summary['spread_sprout_and_branch_orientation'] = safe_percentile_spread(orientations_deg)
-    if len(median_cs_areas) > 0:
-        summary['median_sprout_and_branch_median_cs_area'] = safe_median(median_cs_areas)
-        summary['spread_sprout_and_branch_median_cs_area'] = safe_percentile_spread(median_cs_areas)
-    if len(branch_lengths) > 0:
-        summary['median_sprout_and_branch_length'] = safe_median(branch_lengths)
-        summary['spread_sprout_and_branch_length'] = safe_percentile_spread(branch_lengths)
 
     nodes = list(graph.nodes())
     if len(nodes) < 2:
@@ -800,108 +845,15 @@ def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.
 
 
 # ---------------------------------------------------------------------------
-# Internal pore metrics
+# Internal pore visualisation helpers
 # ---------------------------------------------------------------------------
-
-def compute_internal_pore_headline_metrics(
-    mask,
-    voxel_size_um=(2.0, 2.0, 2.0),
-    min_pore_area_um2=16.0,
-    max_pore_area_fraction_of_slice=0.15,
-    use_gpu_edt=True,
-    exclusion_mask_xy=None,
-):
-    voxel_size_um = np.asarray(voxel_size_um, dtype=float)
-    _, y_um, x_um = voxel_size_um
-    pixel_area_um2 = float(y_um * x_um)
-
-    total_pore_area_um2 = 0.0
-    total_filled_area_um2 = 0.0
-    pore_areas_all = []
-    pore_radii_all = []
-
-    # B1: two-pass approach — collect pore slices first, batch all GPU EDT transfers,
-    # then accumulate metrics.  Reduces N×(CPU→GPU + GPU→CPU) to 1×(CPU→GPU + GPU→CPU).
-    pore_slice_data = []  # list of dicts: {z, pores, labeled, valid_label_ids, valid_areas, filled_area_um2}
-
-    for z in range(mask.shape[0]):
-        vessel_slice = mask[z].astype(bool)
-        filled_slice = ndi.binary_fill_holes(vessel_slice)
-        internal_pores = filled_slice & ~vessel_slice
-
-        if exclusion_mask_xy is not None:
-            internal_pores = internal_pores & ~exclusion_mask_xy
-            filled_slice   = filled_slice   & ~exclusion_mask_xy
-
-        filled_area_um2 = float(np.count_nonzero(filled_slice)) * pixel_area_um2
-        total_filled_area_um2 += filled_area_um2
-
-        if not np.any(internal_pores):
-            continue
-
-        labeled, n_labels = ndi.label(internal_pores, structure=np.ones((3, 3), dtype=np.uint8))
-        if n_labels == 0:
-            continue
-
-        area_counts   = np.bincount(labeled.ravel(), minlength=n_labels + 1)[1:].astype(np.float64)
-        area_um2_all  = area_counts * pixel_area_um2
-
-        slice_area_um2   = float(vessel_slice.size) * pixel_area_um2
-        max_pore_area_um2 = float(max_pore_area_fraction_of_slice) * slice_area_um2
-
-        label_ids  = np.arange(1, n_labels + 1, dtype=np.int32)
-        valid_mask = (area_um2_all >= min_pore_area_um2) & (area_um2_all <= max_pore_area_um2)
-        if not np.any(valid_mask):
-            continue
-
-        pore_slice_data.append({
-            'z':               z,
-            'pores':           internal_pores,
-            'labeled':         labeled,
-            'valid_label_ids': label_ids[valid_mask],
-            'valid_areas':     area_um2_all[valid_mask],
-        })
-
-    if not pore_slice_data:
-        return {
-            'median_internal_pore_area': np.nan,
-            'spread_internal_pore_area': np.nan,
-        }
-
-    # ── GPU batch EDT ──────────────────────────────────────────────────────
-    if use_gpu_edt:
-        pore_stack    = np.stack([d['pores'] for d in pore_slice_data], axis=0)  # (N, H, W) uint8
-        pore_gpu      = cp.asarray(pore_stack.astype(np.uint8))
-        dist_list_gpu = [
-            ndi_gpu.distance_transform_edt(pore_gpu[i], sampling=(float(y_um), float(x_um)))
-            for i in range(pore_gpu.shape[0])
-        ]
-        dist_stack    = cp.asnumpy(cp.stack(dist_list_gpu, axis=0))  # (N, H, W) – single transfer back
-        del pore_gpu, dist_list_gpu
-        cp.get_default_memory_pool().free_all_blocks()
-    else:
-        dist_stack = np.stack([
-            edt(d['pores'], sampling=(y_um, x_um)) for d in pore_slice_data
-        ], axis=0)
-
-    # ── Accumulate metrics ────────────────────────────────────────────────
-    for idx, d in enumerate(pore_slice_data):
-        dist_map_um    = dist_stack[idx]
-        valid_radii    = np.asarray(
-            ndi.maximum(dist_map_um, labels=d['labeled'], index=d['valid_label_ids']),
-            dtype=float,
-        )
-        pore_areas_all.append(d['valid_areas'])
-        pore_radii_all.append(valid_radii)
-        total_pore_area_um2 += float(np.sum(d['valid_areas']))
-
-    all_areas = np.concatenate(pore_areas_all)
-    all_radii = np.concatenate(pore_radii_all)
-
-    return {
-        'median_internal_pore_area': float(np.median(all_areas)),
-        'spread_internal_pore_area': float(np.percentile(all_areas, 90) - np.percentile(all_areas, 10)),
-    }
+# Note: pore *metrics* (median area, spread, inscribed radius, …) were
+# removed from the analysis pipeline because they were noisy 2D
+# slice-by-slice estimates that largely duplicated information already
+# captured by ``branches_per_volume``, ``median_branch_median_cs_area``
+# and ``skeleton_lacunarity``. The label-volume helper below is kept
+# because ``vascumap/core.py`` still uses it to save interim ``_holes``
+# arrays for napari visualisation.
 
 
 def build_internal_pore_label_volumes(
@@ -1147,7 +1099,6 @@ def clean_and_analyse(
     voxel_size_um = np.asarray(voxel_size_um, dtype=float)
     voxel_volume_um3 = float(np.prod(voxel_size_um))
     chunk_size = (vasculature_segmentation.shape[0], 512, 512)
-    max_internal_pore_area_fraction_of_slice = 0.10
 
     # Determine the device long axis from the image footprint (y=shape[1], x=shape[2]).
     # If x-extent >= y-extent the image is landscape → long axis is x; otherwise y.
@@ -1282,23 +1233,14 @@ def clean_and_analyse(
 
     if clean_graph.number_of_edges() > 0:
         fd, lacunarity = fractal_dimension_and_lacunarity(skeleton_from_graph > 0)
-        # Sprout/junction counts come from the original cleaned graph so
-        # a sprout-bearing junction still counts as a junction.
-        per_edge_is_sprout = [
-            clean_graph.nodes[u]['sprout'] or clean_graph.nodes[v]['sprout']
-            for u, v in clean_graph.edges()
-        ]
-        sprouts_count = int(sum(per_edge_is_sprout))
+        # Classify every edge as branch / attached_sprout / floating_sprout
+        # using the strict 2-node-component definition for floating sprouts.
+        edge_kind_lookup = classify_sprout_edges(clean_graph)
+        kinds = np.asarray(list(edge_kind_lookup.values()))
+        attached_sprouts_count = int(np.count_nonzero(kinds == 'attached_sprout'))
+        floating_sprouts_count = int(np.count_nonzero(kinds == 'floating_sprout'))
         branchpoints_count = sum(
             1 for n in clean_graph.nodes() if not clean_graph.nodes[n]['sprout']
-        )
-        # Floating components: connected components in which every node is a
-        # sprout (degree-1 endpoint). These are vessel fragments not attached
-        # to the branching network — e.g. a single edge whose two endpoints
-        # are both degree-1.
-        floating_sprouts_count = sum(
-            1 for cc in nx.connected_components(clean_graph)
-            if all(clean_graph.nodes[n]['sprout'] for n in cc)
         )
         # L_total and the branch count come from the sprout-collapsed
         # graph so an A — J — B vessel with a sprout off J is a single
@@ -1323,7 +1265,7 @@ def clean_and_analyse(
         fd, lacunarity = np.nan, np.nan
         total_vessel_length_um = 0.0
         branchpoints_count = 0
-        sprouts_count = 0
+        attached_sprouts_count = 0
         branches_count = 0
         floating_sprouts_count = 0
 
@@ -1336,16 +1278,16 @@ def clean_and_analyse(
     global_metrics['branch_length_per_volume'] = safe_divide(
         total_vessel_length_um, convex_hull_volume_um3,
     )
-    global_metrics['sprouts_per_vessel_length'] = safe_divide(sprouts_count, total_vessel_length_um)
+    global_metrics['attached_sprouts_per_vessel_length'] = safe_divide(
+        attached_sprouts_count, total_vessel_length_um,
+    )
     global_metrics['junctions_per_vessel_length'] = safe_divide(branchpoints_count, total_vessel_length_um)
     global_metrics['skeleton_fractal_dimension'] = fd
     global_metrics['skeleton_lacunarity'] = lacunarity
-    global_metrics['median_sprout_and_branch_orientation'] = np.nan
-    global_metrics['spread_sprout_and_branch_orientation'] = np.nan
-    global_metrics['median_sprout_and_branch_median_cs_area'] = np.nan
-    global_metrics['spread_sprout_and_branch_median_cs_area'] = np.nan
-    global_metrics['median_sprout_and_branch_length'] = np.nan
-    global_metrics['spread_sprout_and_branch_length'] = np.nan
+    # Distance-headline placeholders; populated by
+    # ``summarize_network_headline_metrics`` below. Per-edge aggregates
+    # (orientation / length / cs_area) are owned by
+    # ``compute_all_morphological_params``.
     global_metrics['median_junction_skeleton_dist_nearest_junction'] = np.nan
     global_metrics['spread_junction_skeleton_dist_nearest_junction'] = np.nan
     global_metrics['median_sprout_skeleton_dist_nearest_endpoint'] = np.nan
@@ -1385,18 +1327,10 @@ def clean_and_analyse(
         else np.nan
     )
 
-    pore_global_metrics = compute_internal_pore_headline_metrics(
-        clean_segmentation.astype(bool),
-        voxel_size_um=voxel_size_um,
-        min_pore_area_um2=16.0,
-        max_pore_area_fraction_of_slice=max_internal_pore_area_fraction_of_slice,
-        use_gpu_edt=True,
-        exclusion_mask_xy=exclusion_mask_xy,
-    )
-    global_metrics.update(pore_global_metrics)
-
     # ---- extra density metrics (per hull volume) ----
-    global_metrics['sprouts_per_volume'] = safe_divide(sprouts_count, convex_hull_volume_um3)
+    global_metrics['attached_sprouts_per_volume'] = safe_divide(
+        attached_sprouts_count, convex_hull_volume_um3,
+    )
     global_metrics['junctions_per_volume'] = safe_divide(branchpoints_count, convex_hull_volume_um3)
     global_metrics['branches_per_volume'] = safe_divide(branches_count, convex_hull_volume_um3)
     global_metrics['floating_sprouts_per_volume'] = safe_divide(
@@ -1404,10 +1338,10 @@ def clean_and_analyse(
     )
 
     # ---- raw counts (for comprehensive output) ----
-    global_metrics['total_number_of_sprouts'] = int(sprouts_count)
+    global_metrics['n_attached_sprouts'] = int(attached_sprouts_count)
+    global_metrics['n_floating_sprouts'] = int(floating_sprouts_count)
     global_metrics['total_number_of_branches'] = int(branches_count)
     global_metrics['total_number_of_junctions'] = int(branchpoints_count)
-    global_metrics['total_number_of_floating_sprouts'] = int(floating_sprouts_count)
     global_metrics['total_number_of_edges'] = int(clean_graph.number_of_edges())
     global_metrics['total_number_of_nodes'] = int(clean_graph.number_of_nodes())
 
@@ -1417,10 +1351,19 @@ def clean_and_analyse(
         voxel_size_um=voxel_size_um,
         distance_threshold_um=500.0,
     )
+    # Sprout-free junction view: source for the ``*_branch_only_junction_*``
+    # aggregator family (e.g. branch-only junction degree, which excludes
+    # sprout-edges from the degree count).
+    branch_only_junction_metrics_df = compute_junction_metrics_df(
+        branch_only_graph,
+        voxel_size_um=voxel_size_um,
+        distance_threshold_um=500.0,
+    )
 
     # ---- comprehensive all-params DataFrame ----
     all_morphological_params_df = compute_all_morphological_params(
-        global_metrics, branch_metrics_df, branch_only_metrics_df, junction_metrics_df,
+        global_metrics, branch_metrics_df, branch_only_metrics_df,
+        junction_metrics_df, branch_only_junction_metrics_df,
     )
 
     # ---- curated, shape-invariant analysis-metrics panel (PCA / clustering) ----
@@ -1433,6 +1376,7 @@ def clean_and_analyse(
         'branch_metrics_df': branch_metrics_df,
         'branch_only_metrics_df': branch_only_metrics_df,
         'junction_metrics_df': junction_metrics_df,
+        'branch_only_junction_metrics_df': branch_only_junction_metrics_df,
         'all_morphological_params_df': all_morphological_params_df,
         'analysis_metrics_df': analysis_metrics_df,
         'voxel_size_um': voxel_size_um,
