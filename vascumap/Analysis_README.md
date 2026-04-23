@@ -17,18 +17,48 @@ in the lab.
 
 ---
 
-## Scope and notation
+## Why We Picked these Parameters
 
-All values are derived from the **final cleaned segmentation, skeleton, and
-graph** (after smoothing, hole-filling, pruning, mid-node removal, border /
-exclusion zone trimming, and isolated-node removal). The default voxel size
-is `(2, 2, 2) µm`.
+All values are derived from the **cleaned segmentation** (after smoothing, hole-filling, and pruning).
+The resulting graph networks have mid-node removal and border-zone trimming.
+Analysis parameters have been selected based on:
+1. **Shape-invariance.** This means that they don't scale with the chip size.
+   They are either dimensionless ratios (e.g. vessel volume fraction),
+   per-unit-volume densities normalised by the convex hull (every
+   `*_per_volume` column), or intrinsic per-vessel/per-junction
+   quantities (e.g. typical branch length in microns). We don't want to measure
+   values like "vessel volume", as this will trivially increase with increasing
+   chip size. The analysis parameters selected prevent PCAs from just separating
+   different chip sizes: images of the same biology but cropped to different
+   sizes should give very similar output values.
+3. **Biological interpretability.** Biologically relevant features have been
+   selected.
+5. **Manageable dimensionality.** Seventeen features is hopefully
+   sufficient to allow PCA clustering at smaller sample sizes while still
+   carrying separable density, geometry, topology, connectivity, and
+   orientation channels.
+
+Lots of parameters are divided by a volume to ensure shape invariance. We have
+chosen the convex hull volume ($V_{hull}$) as the denominator for this normalisation.
+The convex hull volume is usually just ~ the chip (gel) volume. However, in cases where
+the vasculature is tilted, there can be some differences between the convex hull and chip 
+volume, so we use the convex hull volume to be safe. In cases where there is an organoid in
+the gel, the organoid region is subtracted from the convex hull volume before normalisation. 
+
+  <img src="README_images/convex_hull.jpg" width="75%" />
+
+## Sprout Removal
+
+  <img src="README_images/prune_sprouts.jpg" width="75%" />
+
+Sprouts (degree-1 nodes) are identified and the density of sprouts per volume is calculated.
+WANT TO QUANTIFY THE NUMBER OF FLOATING SPROUTS AS WELL, ONLY ADD TO ALL MORPHOLGOICAL PARAMETERS
+However,
+these sprouts (and their nodes) are then removed from the cleaned graph before running the rest of
+the quantification. 
 
 Symbols used throughout:
 
-- $V_{chip}$: chip / imaged volume in $\mu m^3$. When an organoid is imaged,
-- its masked volume is **subtracted**
-  from $V_{chip}$ so it does not count as available space.
 - $V_{hull}$: convex-hull volume of the segmented vasculature in $\mu m^3$.
   When an organoid is masked, the volume of the organoid in the convex hull
   is subtracted from the hull volume. In symbols:
@@ -36,7 +66,7 @@ Symbols used throughout:
 - $V_{vessel}$: total vessel volume (number of vessel-positive voxels times
   voxel volume) in $\mu m^3$. The organoid region is set to zero in the
   segmentation before this is counted, so excluded voxels never contribute.
-- $L_{total}$: total centerline length of **non-sprout** graph edges in $\mu m$
+- $L_{total}$: total centerline length of non-sprout graph edges in $\mu m$
   (sprout edges are excluded because their length depends on tip-pruning depth).
 - $N_{junction}$: number of non-sprout graph nodes (i.e. branch points).
 - $N_{sprout}$: number of graph edges incident to at least one sprout (degree-1)
@@ -45,23 +75,6 @@ Symbols used throughout:
   distribution. Selected as a robust, outlier-tolerant measure of the spread of values.
 - "Sprout" = a degree-1 endpoint (a tip). "Branch" = a non-tip edge connecting
   two junctions. "Sprout-and-branch" = the union (every edge in the graph).
-
-Voxel-index variants of per-edge endpoint coordinates carry an `_idx`
-suffix (e.g. `start_z_idx`) to distinguish them from the physical-µm
-versions (e.g. `start_z`). Aggregator column names follow
-`<aggregate>_<subset>_<column>`, where `<aggregate>` is one of `mean`,
-`std`, `median`, or `spread` (the P90 − P10 difference, an
-outlier-robust measure of distribution width).
-
-> **All volume normalisations are by $V_{hull}$.** Every column whose
-> name ends in `_per_volume` (e.g. `sprouts_per_volume`,
-> `branch_length_per_volume`, `branches_per_volume`,
-> `floating_sprouts_per_volume`) divides by the **convex-hull volume of
-> the segmented vasculature, with any organoid (exclusion-mask) region
-> subtracted** — i.e. the biologically available gel space inside the
-> vascular envelope. There is no separate per-chip-volume family. See
-> *Convex hull and exclusion regions* below for how $V_{hull}$ is
-> computed.
 
 ### Branch-only vs full cleaned graph
 
@@ -96,25 +109,7 @@ statistics. Total length is preserved by the merge
 
 There are 17 features in `*_analysis_metrics.csv`. They were chosen to be:
 
-1. **Shape-invariant.** None of these features scales with the chip size.
-   They are either dimensionless ratios (e.g. vessel volume fraction),
-   per-unit-volume densities normalised by the convex hull (every
-   `*_per_volume` column), or intrinsic per-vessel/per-junction
-   quantities (e.g. typical branch length in microns). This means two
-   images of the same biology cropped to different sizes should give
-   very similar values, preventing PCA from trivially separating
-   different chip sizes.
-2. **Biologically interpretable.** Features can be thought of in terms of
-   the underlying biology.
-3. **Manageable dimensionality.** Seventeen features is hopefully
-   sufficient to allow PCA clustering at smaller sample sizes while still
-   carrying separable density, geometry, topology, connectivity, and
-   orientation channels.
 
-Every `*_per_volume` column is normalised to **$V_{hull}$ with the
-organoid region subtracted** (see *Convex hull and exclusion regions*
-below) — the biologically available gel space inside the vascular
-envelope.
 
 ### The 17 curated features
 
@@ -148,16 +143,7 @@ junction nodes). Sprout edges are excluded because their length and
 calibre depend on where the skeletonisation pipeline chose to terminate
 the tip (see *Tortuosity — branch-only* below).
 
-> **Important — sprout-bearing junctions are dissolved before these
-> aggregates are computed.** Aggregates in this section are computed
-> on the **branch-only graph**: every sprout (degree-1) node is
-> removed from the cleaned graph and `remove_mid_node` is re-applied,
-> so a vessel ``A — J — B`` with a tip ``S`` off ``J`` is treated as
-> *one* branch (the merged ``A — B`` polyline) rather than two short
-> edges meeting at ``J``. This avoids artificially deflating
-> `median_branch_length`, inflating `branches_per_volume`, and
-> distorting branch tortuosity. See *Branch-only vs full cleaned
-> graph* in *Scope and notation*.
+
 
 | Column | Units | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|---|
@@ -292,7 +278,12 @@ the graph topology.
 ---
 
 ## All Morphological Parameters — full audit reference
-
+Voxel-index variants of per-edge endpoint coordinates carry an `_idx`
+suffix (e.g. `start_z_idx`) to distinguish them from the physical-µm
+versions (e.g. `start_z`). Aggregator column names follow
+`<aggregate>_<subset>_<column>`, where `<aggregate>` is one of `mean`,
+`std`, `median`, or `spread` (the P90 − P10 difference, an
+outlier-robust measure of distribution width).
 `*_all_morphological_params.csv` contains a superset of every metric
 the pipeline computes. It includes:
 
@@ -437,48 +428,10 @@ Computed on the same cleaned skeleton mask. **Lower** values indicate a
 stronger spatial **clustering / patchiness** of branches.
 
 A common confusion: *"isn't this measuring the same thing as the spread in
-vessel cross-sectional area?"* No — calibre and pore spread are
-**size-distribution** metrics, while skeleton lacunarity is a
-**spatial-organisation** metric. You can match one and change the other.
+vessel cross-sectional area?"* No: skeleton lacunarity is a
+**spatial-organisation** metric. 
 
   <img src="README_images/lacunarity.png" width="75%" />
-
-### Convex hull and exclusion regions
-
-When the pipeline is given an `exclusion_mask_xy` (e.g. an organoid mask),
-it is treated as **unavailable space** at every step that involves a
-denominator volume:
-
-1. The exclusion region is z-extruded to a 3D mask and **zeroed in the
-   segmentation** before any vessel statistics are computed.
-2. Its z-extruded volume is **subtracted from $V_{chip}$**.
-3. For $V_{hull}$, we first compute the geometric convex hull of the vessel
-   point cloud (which has organoid voxels already zeroed), then test which
-   voxels of the z-extruded exclusion region fall *inside* that hull and
-   subtract their volume:
-
-$$V_{hull} \; = \; V_{hull,\,raw} \; - \; V_{exclusion \,\cap\, hull}.$$
-
-This matters because an organoid that sits *inside* the vascular envelope
-would otherwise inflate the denominator of `vessel_volume_fraction` and
-`branch_length_per_volume`, biasing them downward in
-proportion to the organoid size. With the correction in place,
-`vessel_volume_fraction = V_{vessel}/(V_{gel \cap hull})` — exactly the
-biologically meaningful quantity "fraction of the gel space inside the
-vascular envelope that is occupied by vessels".
-
-If no exclusion mask is supplied, $V_{hull}$ reduces to the raw convex-hull
-volume.
-
-**Implementation note (performance).** The inside/outside test uses a
-`scipy.spatial.Delaunay` triangulation of the hull vertices and is
-vectorised over all candidate exclusion voxels. To keep the cost low on
-large fields of view, the exclusion voxels are first prefiltered by the
-hull's axis-aligned bounding box, so only voxels that *could* lie inside
-the hull are passed to the inside-test. On a realistic
-$60 \times 1024 \times 1024$ image with a $\sim 5\,$M-voxel z-extruded
-organoid, the entire correction adds well under a second on top of the
-underlying `ConvexHull` computation that the pipeline already performs.
 
 ### Distance convention
 
