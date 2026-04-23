@@ -633,10 +633,10 @@ def compute_all_morphological_params(
 ANALYSIS_METRICS_COLUMNS = [
     # Density (5)
     'vessel_volume_fraction',
-    'branch_length_per_hull_volume',
-    'sprouts_per_hull_volume',
-    'junctions_per_hull_volume',
-    'branches_per_hull_volume',
+    'branch_length_per_volume',
+    'sprouts_per_volume',
+    'junctions_per_volume',
+    'branches_per_volume',
     # Topology (2)
     'skeleton_fractal_dimension',
     'skeleton_lacunarity',
@@ -1219,7 +1219,7 @@ def clean_and_analyse(
     # mid-node collapse. A junction whose only reason to be degree > 2
     # was a sprout is dissolved, so a vessel A — J — B with a tip off J
     # appears as a single A — B edge here. Used as the source for every
-    # ``*_branch_*`` aggregate and for ``branches_per_hull_volume`` /
+    # ``*_branch_*`` aggregate and for ``branches_per_volume`` /
     # ``total_number_of_branches``. Junction counts, junction
     # connectivity, sprout-side stats and densities continue to use
     # ``clean_graph`` so a sprout-bearing junction still counts as a
@@ -1333,7 +1333,7 @@ def clean_and_analyse(
     global_metrics['vessel_volume_fraction'] = safe_divide(vessel_volume_um3, convex_hull_volume_um3)
     global_metrics['total_vessel_length'] = float(total_vessel_length_um)
     # Length-density: branch-only length per hull volume (sprouts excluded).
-    global_metrics['branch_length_per_hull_volume'] = safe_divide(
+    global_metrics['branch_length_per_volume'] = safe_divide(
         total_vessel_length_um, convex_hull_volume_um3,
     )
     global_metrics['sprouts_per_vessel_length'] = safe_divide(sprouts_count, total_vessel_length_um)
@@ -1396,10 +1396,10 @@ def clean_and_analyse(
     global_metrics.update(pore_global_metrics)
 
     # ---- extra density metrics (per hull volume) ----
-    global_metrics['sprouts_per_hull_volume'] = safe_divide(sprouts_count, convex_hull_volume_um3)
-    global_metrics['junctions_per_hull_volume'] = safe_divide(branchpoints_count, convex_hull_volume_um3)
-    global_metrics['branches_per_hull_volume'] = safe_divide(branches_count, convex_hull_volume_um3)
-    global_metrics['floating_sprouts_per_hull_volume'] = safe_divide(
+    global_metrics['sprouts_per_volume'] = safe_divide(sprouts_count, convex_hull_volume_um3)
+    global_metrics['junctions_per_volume'] = safe_divide(branchpoints_count, convex_hull_volume_um3)
+    global_metrics['branches_per_volume'] = safe_divide(branches_count, convex_hull_volume_um3)
+    global_metrics['floating_sprouts_per_volume'] = safe_divide(
         floating_sprouts_count, convex_hull_volume_um3,
     )
 

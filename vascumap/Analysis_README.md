@@ -53,6 +53,16 @@ versions (e.g. `start_z`). Aggregator column names follow
 `std`, `median`, or `spread` (the P90 − P10 difference, an
 outlier-robust measure of distribution width).
 
+> **All volume normalisations are by $V_{hull}$.** Every column whose
+> name ends in `_per_volume` (e.g. `sprouts_per_volume`,
+> `branch_length_per_volume`, `branches_per_volume`,
+> `floating_sprouts_per_volume`) divides by the **convex-hull volume of
+> the segmented vasculature, with any organoid (exclusion-mask) region
+> subtracted** — i.e. the biologically available gel space inside the
+> vascular envelope. There is no separate per-chip-volume family. See
+> *Convex hull and exclusion regions* below for how $V_{hull}$ is
+> computed.
+
 ### Branch-only vs full cleaned graph
 
 Two views of the graph are used internally:
@@ -70,13 +80,13 @@ Two views of the graph are used internally:
   *dissolved*: the polylines of ``A — J`` and ``J — B`` are
   concatenated into a single ``A — B`` edge. Used as the source for
   every `*_branch_*` aggregate, for `total_vessel_length` / $L_{total}$,
-  for `branch_length_per_hull_volume`, and for the branch count
-  (`total_number_of_branches`, `branches_per_hull_volume`).
+  for `branch_length_per_volume`, and for the branch count
+  (`total_number_of_branches`, `branches_per_volume`).
 
 Without this collapse, a single biological vessel that happens to carry
 a sprout midway along its length would be split into two short edges in
 the cleaned graph, biasing `median_branch_length` downward, inflating
-`branches_per_hull_volume`, and altering branch tortuosity / calibre
+`branches_per_volume`, and altering branch tortuosity / calibre
 statistics. Total length is preserved by the merge
 (`L_total` is unchanged), but per-branch medians and counts are not.
 
@@ -88,11 +98,12 @@ There are 17 features in `*_analysis_metrics.csv`. They were chosen to be:
 
 1. **Shape-invariant.** None of these features scales with the chip size.
    They are either dimensionless ratios (e.g. vessel volume fraction),
-   per-unit-volume densities normalised by the convex hull (e.g. branches
-   per hull volume), or intrinsic per-vessel/per-junction quantities (e.g.
-   typical branch length in microns). This means two images of the same
-   biology cropped to different sizes should give very similar values to
-   prevent PCA from just trivially separating different chip sizes.
+   per-unit-volume densities normalised by the convex hull (every
+   `*_per_volume` column), or intrinsic per-vessel/per-junction
+   quantities (e.g. typical branch length in microns). This means two
+   images of the same biology cropped to different sizes should give
+   very similar values, preventing PCA from trivially separating
+   different chip sizes.
 2. **Biologically interpretable.** Features can be thought of in terms of
    the underlying biology.
 3. **Manageable dimensionality.** Seventeen features is hopefully
@@ -100,9 +111,10 @@ There are 17 features in `*_analysis_metrics.csv`. They were chosen to be:
    carrying separable density, geometry, topology, connectivity, and
    orientation channels.
 
-All volume densities are normalised to **$V_{hull}$ with the organoid
-region subtracted** (see *Convex hull and exclusion regions* below); this
-is the biologically available gel space inside the vascular envelope.
+Every `*_per_volume` column is normalised to **$V_{hull}$ with the
+organoid region subtracted** (see *Convex hull and exclusion regions*
+below) — the biologically available gel space inside the vascular
+envelope.
 
 ### The 17 curated features
 
@@ -111,16 +123,16 @@ is the biologically available gel space inside the vascular envelope.
 | Column | Units | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|---|
 | `vessel_volume_fraction` | unitless | $V_{vessel}/V_{hull}$ | The fraction of the convex hull around the vasculature that is actually filled with vessel tissue. A global readout of how densely vascularised the sample is, regardless of how big the imaged region was. **Excluded organoid volume is subtracted from the denominator** so the fraction reflects only the gel space available for vessels. | Ratio of two volumes, both intrinsic to the sample. |
-| `branch_length_per_hull_volume` | $\mu m^{-2}$ | $L_{total}/V_{hull}$ | Total amount of **non-sprout** vessel "wire" per unit envelope volume. Sprouts are excluded from the numerator because their length depends on tip-pruning depth. Higher means more or finer connecting vasculature. | Length divided by volume → intensive (does not scale with FOV). |
-| `sprouts_per_hull_volume` | $\mu m^{-3}$ | $N_{sprout}/V_{hull}$ | Sprout count per unit envelope volume — the spatial density of tips within the gel space. A direct readout of **angiogenic sprouting intensity**. | Count per volume. |
-| `junctions_per_hull_volume` | $\mu m^{-3}$ | $N_{junction}/V_{hull}$ | Junction count per unit envelope volume — the spatial density of branch points within the gel space. A direct readout of **branching intensity**. | Count per volume. |
-| `branches_per_hull_volume` | $\mu m^{-3}$ | $N_{branch}/V_{hull}$ | **Curated.** Non-sprout edge count per unit envelope volume, taken from the **branch-only graph** (sprout-bearing intermediate junctions dissolved). | Count per volume. |
+| `branch_length_per_volume` | $\mu m^{-2}$ | $L_{total}/V_{hull}$ | Total amount of **non-sprout** vessel "wire" per unit envelope volume. Sprouts are excluded from the numerator because their length depends on tip-pruning depth. Higher means more or finer connecting vasculature. | Length divided by volume → intensive (does not scale with FOV). |
+| `sprouts_per_volume` | $\mu m^{-3}$ | $N_{sprout}/V_{hull}$ | Sprout count per unit hull volume — the spatial density of tips within the gel space. A direct readout of **angiogenic sprouting intensity**. | Count per volume. |
+| `junctions_per_volume` | $\mu m^{-3}$ | $N_{junction}/V_{hull}$ | Junction count per unit hull volume — the spatial density of branch points within the gel space. A direct readout of **branching intensity**. | Count per volume. |
+| `branches_per_volume` | $\mu m^{-3}$ | $N_{branch}/V_{hull}$ | Non-sprout edge count per unit hull volume, taken from the **branch-only graph** (sprout-bearing intermediate junctions dissolved). Together with `junctions_per_volume`, parameterises mesh fineness in two complementary ways (count of vertices vs count of edges). | Count per volume. |
 
 The per-vessel-length variants (`sprouts_per_vessel_length`,
 `junctions_per_vessel_length`) are kept in the full
-`*_all_morphological_params.csv` but excluded from the curated panel: they
-are largely captured by the per-hull-volume densities together with
-`branch_length_per_hull_volume`.
+`*_all_morphological_params.csv` but excluded from the curated panel:
+they are largely captured by the `*_per_volume` densities together with
+`branch_length_per_volume`.
 
 #### Topology (2 features)
 
@@ -143,7 +155,7 @@ the tip (see *Tortuosity — branch-only* below).
 > so a vessel ``A — J — B`` with a tip ``S`` off ``J`` is treated as
 > *one* branch (the merged ``A — B`` polyline) rather than two short
 > edges meeting at ``J``. This avoids artificially deflating
-> `median_branch_length`, inflating `branches_per_hull_volume`, and
+> `median_branch_length`, inflating `branches_per_volume`, and
 > distorting branch tortuosity. See *Branch-only vs full cleaned
 > graph* in *Scope and notation*.
 
@@ -238,7 +250,7 @@ curated panel:
   `total_number_of_nodes`, `total_number_of_floating_sprouts` — **raw
   counts**. Same problem as raw size: their density-normalised equivalents
   (per length or per volume) are kept instead.
-- `floating_sprouts_per_hull_volume` — kept in the full file
+- `floating_sprouts_per_volume` — kept in the full file
   (see *Floating sprouts* under *Mathematical caveats* below) but excluded
   from the curated panel because it can be dominated by segmentation noise
   rather than biology.
@@ -322,14 +334,14 @@ The columns below are emitted directly by the pipeline (they are the
 | `convex_hull_volume` | $\mu m^3$ | $V_{hull}$, volume of the 3D convex hull of vessel-positive voxels. | The "envelope" the vasculature occupies. **Excluded from curated panel** for the same reason. |
 | `vessel_volume` | $\mu m^3$ | $V_{vessel}$, total vessel-positive volume. | Total vascular biomass. **Excluded from curated panel.** |
 | `vessel_volume_fraction` | unitless | $V_{vessel}/V_{hull}$ | **Curated.** Fraction of hull occupied by vessels. |
-| `total_vessel_length` | $\mu m$ | $L_{total}$, sum of polyline lengths over the **branch-only graph** (sprout-bearing intermediate junctions dissolved; sprouts excluded — their length depends on tip-pruning depth). | Total length of established (non-tip) vasculature. **Excluded from curated panel** (size-dependent); used internally as the numerator of `branch_length_per_hull_volume`. |
-| `branch_length_per_hull_volume` | $\mu m^{-2}$ | $L_{total}/V_{hull}$ | **Curated.** 3D length density of non-sprout vasculature. |
-| `sprouts_per_vessel_length` | $\mu m^{-1}$ | $N_{sprout}/L_{total}$ | Sprouting intensity per unit vessel length. **Excluded from curated panel** as largely captured by the per-hull-volume densities. |
-| `junctions_per_vessel_length` | $\mu m^{-1}$ | $N_{junction}/L_{total}$ | Branching intensity per unit vessel length. **Excluded from curated panel** as largely captured by the per-hull-volume densities. |
-| `sprouts_per_hull_volume` | $\mu m^{-3}$ | $N_{sprout}/V_{hull}$ | **Curated.** Sprout density per unit envelope volume. |
-| `junctions_per_hull_volume` | $\mu m^{-3}$ | $N_{junction}/V_{hull}$ | **Curated.** Junction density per unit envelope volume. |
-| `branches_per_hull_volume` | $\mu m^{-3}$ | $N_{branch}/V_{hull}$ | **Curated.** Non-sprout edge density per unit envelope volume, counted on the **branch-only graph** (sprout-bearing intermediate junctions dissolved). |
-| `floating_sprouts_per_hull_volume` | $\mu m^{-3}$ | (Number of all-sprout connected components)$/V_{hull}$ | Density of fully-detached sprout fragments — components of the cleaned graph all of whose nodes are degree-1 tips (i.e. vessel pieces with no junction). May reflect either real biological detachments or segmentation noise. **Excluded from curated panel.** See *Floating sprouts* below. |
+| `total_vessel_length` | $\mu m$ | $L_{total}$, sum of polyline lengths over the **branch-only graph** (sprout-bearing intermediate junctions dissolved; sprouts excluded — their length depends on tip-pruning depth). | Total length of established (non-tip) vasculature. **Excluded from curated panel** (size-dependent); used internally as the numerator of `branch_length_per_volume`. |
+| `branch_length_per_volume` | $\mu m^{-2}$ | $L_{total}/V_{hull}$ | **Curated.** 3D length density of non-sprout vasculature. |
+| `sprouts_per_vessel_length` | $\mu m^{-1}$ | $N_{sprout}/L_{total}$ | Sprouting intensity per unit vessel length. **Excluded from curated panel** as largely captured by the `*_per_volume` densities. |
+| `junctions_per_vessel_length` | $\mu m^{-1}$ | $N_{junction}/L_{total}$ | Branching intensity per unit vessel length. **Excluded from curated panel** as largely captured by the `*_per_volume` densities. |
+| `sprouts_per_volume` | $\mu m^{-3}$ | $N_{sprout}/V_{hull}$ | **Curated.** Sprout density per unit envelope volume. |
+| `junctions_per_volume` | $\mu m^{-3}$ | $N_{junction}/V_{hull}$ | **Curated.** Junction density per unit envelope volume. |
+| `branches_per_volume` | $\mu m^{-3}$ | $N_{branch}/V_{hull}$ | **Curated.** Non-sprout edge density per unit envelope volume, counted on the **branch-only graph** (sprout-bearing intermediate junctions dissolved). |
+| `floating_sprouts_per_volume` | $\mu m^{-3}$ | (Number of all-sprout connected components)$/V_{hull}$ | Density of fully-detached sprout fragments — components of the cleaned graph all of whose nodes are degree-1 tips (i.e. vessel pieces with no junction). May reflect either real biological detachments or segmentation noise. **Excluded from curated panel.** See *Floating sprouts* below. |
 | `skeleton_fractal_dimension` | unitless | Box-counting slope of the cleaned graph-derived skeleton mask. | **Curated.** Geometric complexity of the centerline network. |
 | `skeleton_lacunarity` | unitless | Gap/heterogeneity statistic on the same skeleton mask. | **Curated.** Spatial patchiness / unevenness of the centerline network. |
 | `median_sprout_and_branch_orientation` | degrees | Median per-edge orientation to the auto-detected device long axis. | **Curated.** Dominant vessel alignment. |
@@ -449,7 +461,7 @@ $$V_{hull} \; = \; V_{hull,\,raw} \; - \; V_{exclusion \,\cap\, hull}.$$
 
 This matters because an organoid that sits *inside* the vascular envelope
 would otherwise inflate the denominator of `vessel_volume_fraction` and
-`branch_length_per_hull_volume`, biasing them downward in
+`branch_length_per_volume`, biasing them downward in
 proportion to the organoid size. With the correction in place,
 `vessel_volume_fraction = V_{vessel}/(V_{gel \cap hull})` — exactly the
 biologically meaningful quantity "fraction of the gel space inside the
@@ -502,7 +514,7 @@ not attached to any junction. Previously the cleaning step only removed
 (both endpoints degree 1, connected by one edge) survived into the metrics
 but were never explicitly counted. The pipeline now reports
 `total_number_of_floating_sprouts` and
-`floating_sprouts_per_hull_volume` in
+`floating_sprouts_per_volume` in
 `*_all_morphological_params.csv`.
 
 These components can represent either real biological detachments (e.g.
