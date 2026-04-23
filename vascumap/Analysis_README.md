@@ -49,13 +49,20 @@ the gel, the organoid region is subtracted from the convex hull volume before no
 
 ## Sprout Removal
 
+Identify floating sprouts. Quantify their number per hull volume and median and spread in 
+shape. These parameter can be found in all_morphological parameters.
+Identify sprouts (degree-1 nodes). Calculate the density of sprouts per volume and
+the junction connectivity (sprouts and branches). Remove these sprouts (and their nodes) from the skeleton before calculating the
+rest of the parameters.
+
   <img src="README_images/prune_sprouts.jpg" width="75%" />
 
-Sprouts (degree-1 nodes) are identified and the density of sprouts per volume is calculated.
-WANT TO QUANTIFY THE NUMBER OF FLOATING SPROUTS AS WELL, ONLY ADD TO ALL MORPHOLGOICAL PARAMETERS
-However,
-these sprouts (and their nodes) are then removed from the cleaned graph before running the rest of
-the quantification. 
+Sprout-only geometry features (`median_sprout_length`,
+`spread_sprout_length`, `median_sprout_median_cs_area`,
+`spread_sprout_median_cs_area`) can be found in 
+`*_all_morphological_params.csv` but are excluded from the curated panel
+because their absolute values are dominated by the skeletonisation algorithm.
+
 
 Symbols used throughout:
 
@@ -76,42 +83,10 @@ Symbols used throughout:
 - "Sprout" = a degree-1 endpoint (a tip). "Branch" = a non-tip edge connecting
   two junctions. "Sprout-and-branch" = the union (every edge in the graph).
 
-### Branch-only vs full cleaned graph
-
-Two views of the graph are used internally:
-
-- The **cleaned graph** (`clean_graph`): the result of pruning,
-  mid-node removal, and border / exclusion / isolated-node trimming.
-  Sprout edges are still present here. Used for sprout counts,
-  junction counts, junction connectivity, every `*_sprout_*` and
-  `*_sprout_and_branch_*` aggregate, and all density denominators
-  except those involving branches.
-- The **branch-only graph** (`branch_only_graph`): the cleaned graph
-  with every sprout (degree-1) node removed and `remove_mid_node`
-  re-applied. A junction whose only reason to be degree > 2 was a
-  sprout (e.g. ``A — J — B`` with a tip ``S`` off ``J``) is therefore
-  *dissolved*: the polylines of ``A — J`` and ``J — B`` are
-  concatenated into a single ``A — B`` edge. Used as the source for
-  every `*_branch_*` aggregate, for `total_vessel_length` / $L_{total}$,
-  for `branch_length_per_volume`, and for the branch count
-  (`total_number_of_branches`, `branches_per_volume`).
-
-Without this collapse, a single biological vessel that happens to carry
-a sprout midway along its length would be split into two short edges in
-the cleaned graph, biasing `median_branch_length` downward, inflating
-`branches_per_volume`, and altering branch tortuosity / calibre
-statistics. Total length is preserved by the merge
-(`L_total` is unchanged), but per-branch medians and counts are not.
-
----
 
 ## Curated Analysis Metrics
 
-There are 17 features in `*_analysis_metrics.csv`. They were chosen to be:
-
-
-
-### The 17 curated features
+There are 17 features in `*_analysis_metrics.csv`. 
 
 #### Density (5 features)
 
@@ -123,12 +98,6 @@ There are 17 features in `*_analysis_metrics.csv`. They were chosen to be:
 | `junctions_per_volume` | $\mu m^{-3}$ | $N_{junction}/V_{hull}$ | Junction count per unit hull volume — the spatial density of branch points within the gel space. A direct readout of **branching intensity**. | Count per volume. |
 | `branches_per_volume` | $\mu m^{-3}$ | $N_{branch}/V_{hull}$ | Non-sprout edge count per unit hull volume, taken from the **branch-only graph** (sprout-bearing intermediate junctions dissolved). Together with `junctions_per_volume`, parameterises mesh fineness in two complementary ways (count of vertices vs count of edges). | Count per volume. |
 
-The per-vessel-length variants (`sprouts_per_vessel_length`,
-`junctions_per_vessel_length`) are kept in the full
-`*_all_morphological_params.csv` but excluded from the curated panel:
-they are largely captured by the `*_per_volume` densities together with
-`branch_length_per_volume`.
-
 #### Topology (2 features)
 
 | Column | Units | Math | Biological meaning | Why it is shape-invariant |
@@ -136,14 +105,9 @@ they are largely captured by the `*_per_volume` densities together with
 | `skeleton_fractal_dimension` | unitless | Box-counting slope $D$ of the cleaned skeleton mask (see *Mathematical caveats* below) | A scale-free complexity index of the centerline network. Higher values ($D \to 2$) mean the network fills space more densely with branches; lower values ($D \to 1$) mean it looks more like a sparse tree. | Defined as a scaling exponent, intrinsically scale-free. |
 | `skeleton_lacunarity` | unitless | Variance-to-mean statistic of box-mass distribution on the skeleton | A measure of "patchiness" or unevenness in how branches are distributed in space. Low values mean the network is evenly spread; high values mean there are dense clumps separated by empty regions. Two networks can share fractal dimension but differ strongly in lacunarity. | Constructed from a normalised mass distribution. |
 
-#### Branch geometry — branches only (4 features)
+#### Branch geometry (4 features)
 
-These describe the geometry of **non-sprout** edges (segments between two
-junction nodes). Sprout edges are excluded because their length and
-calibre depend on where the skeletonisation pipeline chose to terminate
-the tip (see *Tortuosity — branch-only* below).
-
-
+These describe the geometry of the graph after sprout removal.
 
 | Column | Units | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|---|
@@ -152,39 +116,8 @@ the tip (see *Tortuosity — branch-only* below).
 | `median_branch_median_cs_area` | $\mu m^2$ | Median across non-sprout edges of each edge's median sampled cross-sectional area | The **typical vessel calibre** (cross-section area) — a thickness proxy — for established (non-tip) vasculature. | Per-vessel measurement, independent of how many vessels are imaged. |
 | `spread_branch_median_cs_area` | $\mu m^2$ | $P90 - P10$ of the per-edge median cross-section area across non-sprout edges | Heterogeneity of vessel calibre across the connecting network. Large spread = mixed vessel sizes; small spread = uniformly sized vessels. | Spread of an intrinsic per-vessel quantity. |
 
-Sprout-only geometry features (`median_sprout_length`,
-`spread_sprout_length`, `median_sprout_median_cs_area`,
-`spread_sprout_median_cs_area`) are emitted in the full
-`*_all_morphological_params.csv` but are excluded from the curated panel
-because their absolute values are dominated by the skeletonisation pruning
-depth.
 
 #### Tortuosity — branch-only (2 features)
-
-Sprouts (degree-1 tips) are excluded from these statistics. Both pieces of
-tortuosity — the centerline length $L_{path}$ and the chord
-$L_{endpoints}$ — do depend on where the skeletonisation algorithm chose
-to terminate the tip; they are *not* independent of the algorithm. The
-problem with the *ratio* $\tau = L_{path}/L_{endpoints}$ is that it is
-dramatically more sensitive to that choice than either piece alone:
-
-- For a near-straight sprout, $L_{path} \approx L_{endpoints}$, so $\tau
-  \approx 1$ no matter where the tip is cut. Fine.
-- For a curved sprout, the chord $L_{endpoints}$ is a 3-D vector between
-  the junction and the tip. Shifting the tip by a few voxels along a
-  curving centerline can swing that chord across an inflection, changing
-  its *direction* and length disproportionately to the small change in
-  $L_{path}$. Geometrically the chord has $90^{\circ}$-ish failure modes
-  that the arc-length does not. The ratio therefore inherits that
-  instability while the path length itself only changes by the few voxels
-  that were added or removed.
-
-In short, $L_{path}$ is a **measurement** of the sprout (small pruning
-changes → small measurement changes), whereas $\tau$ for a sprout is a
-**ratio whose sensitivity to pruning is unbounded**. We therefore report
-sprout length as a biological readout (next subsection) but restrict
-tortuosity statistics to fully-formed connecting branches whose two
-endpoints are both real junctions.
 
 | Column | Units | Math | Biological meaning | Why it is shape-invariant |
 |---|---|---|---|---|
