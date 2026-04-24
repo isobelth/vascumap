@@ -302,9 +302,10 @@ def pca_plots(combined_analysis_metrics, condition_colors, save_dir=None, save_t
         fig.savefig(Path(save_dir) / f"pca_plots.{save_type}", dpi=150)
     plt.show()
 
+    top5 = feat_imp.head(5).index.to_list()
     if len(sig_features) == 0:
         print("No significant features (p < 0.05). Returning top 5 most discriminating features instead.")
-        return feat_imp.head(5).index.to_list()
+        return top5, top5
 
     print(f"Significant features: {len(sig_features)} / {len(X.columns)}")
-    return (sig_features.index.to_list(), feat_imp.head(5).index.to_list())
+    return sig_features.index.to_list(), top5
