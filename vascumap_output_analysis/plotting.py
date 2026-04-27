@@ -309,3 +309,87 @@ def pca_plots(combined_analysis_metrics, condition_colors, save_dir=None, save_t
 
     print(f"Significant features: {len(sig_features)} / {len(X.columns)}")
     return sig_features.index.to_list(), top5
+
+
+def plot_all_feature_discrimination(combined_analysis_metrics, condition_colors,
+                                    save_dir=None, save_type="png"):
+    """Single horizontal bar chart showing every feature ranked by discriminative power.
+
+    Discriminative power = |PCA loading importance (variance-weighted)| * -log10(p-value).
+    Bars are coloured by the class the feature is dominant for (binary: by sign of
+    the PCA loading; multiclass: by the class with the largest absolute deviation
+    from the overall mean).
+    """
+    X = combined_analysis_metrics.drop(
+        ["experiment", "image_name", "source_file", "image_index",
+         "chip_volume_um3", "convex_hull_volume_um3", "vessel_volume_um3", "source_folder"],
+        axis=1, errors="ignore",
+    )
+    y = combined_analysis_metrics["experiment"]
+
+    X = X.dropna(axis=1, how="all")
+    valid = X.notna().all(axis=1)
+    X = X[valid]
+    y = y[valid]
+
+    conditions = [c for c in condition_colors if c in y.unique()]
+    is_binary = len(conditions) == 2
+
+    X_scaled = StandardScaler().fit_transform(X)
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X_scaled)
+    loadings = pca.components_
+    ev = pca.explained_variance_ratio_
+
+    if is_binary:
+        importance_raw = loadings[0] * ev[0] + loadings[1] * ev[1]
+        mean_pc1 = {c: X_pca[y.values == c, 0].mean() for c in conditions}
+        pos_class = max(mean_pc1, key=mean_pc1.get)
+        neg_class = min(mean_pc1, key=mean_pc1.get)
+        p_values = np.array([
+            mannwhitneyu(X.loc[y == conditions[0], c],
+                         X.loc[y == conditions[1], c],
+                         alternative="two-sided")[1]
+            for c in X.columns
+        ])
+    else:
+        weighted_loadings = loadings * ev[:, None]
+        importance_raw = np.sqrt((weighted_loadings ** 2).sum(axis=0))
+        group_means = pd.DataFrame({c: X.loc[y == c].mean() for c in conditions})
+        deviations = group_means.subtract(X.mean(), axis=0).abs()
+        dominant_class = deviations.idxmax(axis=1)
+        p_values = np.array([
+            kruskal(*[X.loc[y == c, col].values for c in conditions])[1]
+            for col in X.columns
+        ])
+
+    neg_log_p = -np.log10(np.clip(p_values, 1e-300, None))
+    discrim = pd.Series(np.abs(importance_raw) * neg_log_p, index=X.columns)
+    discrim = discrim.sort_values(ascending=True)
+
+    if is_binary:
+        signs = pd.Series(importance_raw, index=X.columns)
+        colors = [condition_colors[pos_class] if signs[f] > 0 else condition_colors[neg_class]
+                  for f in discrim.index]
+        xlabel = f"Weighted PCA loading (colour: higher in {pos_class} or {neg_class})"
+    else:
+        colors = [condition_colors.get(dominant_class[f], "grey") for f in discrim.index]
+        xlabel = "Weighted PCA loading (colour: dominant class)"
+
+    n = len(discrim)
+    fig, ax = plt.subplots(figsize=(10, max(4, 0.22 * n)), constrained_layout=True)
+    ax.barh(discrim.index, discrim.values, color=colors)
+    ax.set_xlabel(xlabel)
+    ax.set_title("|PCA loading| × $-\\log_{10}$(p)\n(how well the feature separates the two groups)")
+    ax.tick_params(axis="y", labelsize=8)
+    ax.axvline(0, color="grey", linewidth=0.6)
+
+    # Legend for class colours
+    handles = [plt.Rectangle((0, 0), 1, 1, color=condition_colors[c]) for c in conditions]
+    ax.legend(handles, [c.capitalize() for c in conditions], fontsize=8, loc="lower right")
+
+    if save_dir is not None:
+        fig.savefig(Path(save_dir) / f"all_feature_discrimination.{save_type}", dpi=150)
+    plt.show()
+
+    return discrim.iloc[::-1]
