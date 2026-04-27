@@ -1,7 +1,0 @@
-Column	What it measures
-t_device_seg_s	Hough-transform device detection + RANSAC tilt correction (finding and straightening the chip)
-t_preprocess_s	Z-axis cropping (finding the in-focus plane range) + isotropic resampling
-t_inference_s	Pix2Pix translation + 3× UNet segmentation passes (axial, coronal, sagittal) + majority-vote fusion
-t_analysis_s	Skeletonisation + graph construction + all metrics (lacunarity, fractal dim, orientations, etc.)
-t_pipeline_s	Sum of the three above stages (device seg + preprocess + inference + analysis) — pure compute time
-t_job_wall_s	Wall-clock time for the whole job including model loading, LIF file I/O, and saving outputs to disk
