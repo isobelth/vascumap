@@ -7,7 +7,7 @@ from device_segmentation import DeviceSegmentationApp
 from warnings import filterwarnings
 from models import Pix2Pix, load_segmentation_model, predict_mask_ortho, process_vessel_mask
 from utils import scale, resize_dask
-from skeletonisation import clean_and_analyse, trim_segmentation, generate_skeleton_overview_plot, build_internal_pore_label_volumes, graph2image
+from skeletonisation import clean_and_analyse, trim_segmentation, generate_skeleton_overview_plot, graph2image
 import pickle
 import time
 
@@ -69,7 +69,7 @@ class VascuMap:
         self.z_start_final = None
         self.z_stop_final = None
         self.pixels_to_remove = None
-        self.exclusion_mask_xy_aligned = None
+        self.organoid_mask_aligned = None
         self.resized_organoid_mask_pre_trim = None
         self.image_source_path = image_source_path
         self.image_index = int(image_index) if image_index is not None else 0
@@ -323,14 +323,14 @@ class VascuMap:
         self.vessel_mask_iso = self.vessel_mask_iso[z_start_final:z_stop_final, pixels_to_remove:current_x_pixels-pixels_to_remove, pixels_to_remove:current_y_pixels-pixels_to_remove]
         
         
-    def skeletonisation_and_analysis(self, voxel_size_um=(2.0, 2.0, 2.0), junction_distance_mode='skeleton') -> None:
+    def skeletonisation_and_analysis(self, voxel_size_um=(2.0, 2.0, 2.0)) -> None:
         """Run skeletonisation and vascular-network analysis on the final vessel mask."""
         if self.vessel_mask_iso is None:
             print("No vessel_mask_iso available – skipping analysis.")
             return
 
         # Build exclusion mask matched to vessel_mask_iso shape if organoid masking was used
-        exclusion_mask_xy = None
+        organoid_mask = None
         if self.mask_central_region_enabled and self.cropped_organoid_mask_xy is not None:
             target_h = int(self.vessel_mask_iso.shape[1])
             target_w = int(self.vessel_mask_iso.shape[2])
@@ -365,18 +365,17 @@ class VascuMap:
                                  mode="constant", constant_values=False)
             resized = resized[:target_h, :target_w]
             if np.any(resized):
-                exclusion_mask_xy = resized
+                organoid_mask = resized
 
         # Zero out reconstructed vasculature inside the organoid region
-        if exclusion_mask_xy is not None:
-            self.vessel_mask_iso[:, exclusion_mask_xy] = 0
+        if organoid_mask is not None:
+            self.vessel_mask_iso[:, organoid_mask] = 0
 
-        self.exclusion_mask_xy_aligned = exclusion_mask_xy
+        self.organoid_mask_aligned = organoid_mask
         self.analysis_results = clean_and_analyse(
             self.vessel_mask_iso,
             voxel_size_um=voxel_size_um,
-            junction_distance_mode=junction_distance_mode,
-            exclusion_mask_xy=exclusion_mask_xy,
+            organoid_mask=organoid_mask,
         )
         print(self.analysis_results['global_metrics_df'].to_string(index=False))
 
@@ -413,9 +412,8 @@ class VascuMap:
         Args:
             output_dir: Directory for all saved files. If ``None``, saves to cwd.
             save_all_interim: When ``True``, also saves the extra volumes needed
-                for the full napari visualisation (holes, pore labels, pore
-                distances, full-graph skeleton, clean-graph skeleton, and graph
-                node coordinates).
+                for the full napari visualisation (full-graph skeleton,
+                clean-graph skeleton, and graph node coordinates).
         """
         name_prefix = self.image_name if self.image_name else "image"
         out = Path(output_dir) if output_dir is not None else Path.cwd()
@@ -582,19 +580,12 @@ class VascuMap:
             np.save(str(out / f"{name_prefix}_clean_segmentation.npy"), ar["clean_segmentation"])
             np.save(str(out / f"{name_prefix}_skeleton.npy"), ar["skeleton_from_graph"])
 
-            if self.exclusion_mask_xy_aligned is not None:
+            if self.organoid_mask_aligned is not None:
                 np.save(str(out / f"{name_prefix}_organoid_mask.npy"),
-                        self.exclusion_mask_xy_aligned.astype(np.uint8))
+                        self.organoid_mask_aligned.astype(np.uint8))
 
-            seg = ar["clean_segmentation"].astype(bool)
-            holes, hole_labels, hole_dist = build_internal_pore_label_volumes(
-                seg, voxel_size_um=(2.0, 2.0, 2.0), max_pore_area_fraction_of_slice=0.10,
-            )
             full_skel = graph2image(ar["graph"], self.vessel_mask_iso.shape).astype(np.int32)
 
-            np.save(str(out / f"{name_prefix}_holes.npy"), holes)
-            np.save(str(out / f"{name_prefix}_hole_labels_per_slice.npy"), hole_labels)
-            np.save(str(out / f"{name_prefix}_hole_distance_per_slice_um.npy"), hole_dist)
             np.save(str(out / f"{name_prefix}_full_graph_skeleton.npy"), full_skel)
             np.save(str(out / f"{name_prefix}_vessel_mask.npy"), self.vessel_mask_iso)
 

@@ -7,7 +7,6 @@ run mode so the caller can dispatch to the appropriate batch runner.
 
 from pathlib import Path
 from typing import Optional
-
 from magicgui import magicgui
 from magicgui.widgets import Container, Label, PushButton, RadioButtons, TextEdit
 

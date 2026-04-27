@@ -16,14 +16,6 @@ from scipy.ndimage import rotate, binary_dilation, binary_erosion, binary_fill_h
 from skimage.draw import line
 
 
-def mp_run_threshold_minimum(img_arr, out_path):
-    """Subprocess target: run threshold_minimum and save result to .npy."""
-    import numpy as _np
-    from skimage.filters import threshold_minimum as _tm
-    t = _tm(img_arr, max_num_iter=500)
-    _np.save(out_path, _np.array([t]))
-
-
 def read_voxel_size_um(
     source_path: Optional[Path],
     source_is_lif: bool,
@@ -230,7 +222,6 @@ class DeviceSegmentationApp:
         self.last_organoid_region = None
         self._cropped_organoid_mask_xy_raw = None
 
-
         self.images_output = TextEdit(value="")
         try:
             self.images_output.native.setReadOnly(True)
@@ -281,7 +272,6 @@ class DeviceSegmentationApp:
         self.segment_and_view_widget = segment_and_view
         self.apply_crop = apply_crop
         self.device_width_ok = device_width_ok
-
 
         self.main_panel = Container(
             widgets=[
@@ -465,22 +455,17 @@ class DeviceSegmentationApp:
             return im
         return np.mean(im, axis=-1)
 
-    def focus_score(self, patch):
-        p = np.asarray(self.to_gray(patch), dtype=float)
-        return float(np.std(sobel(p)))
-
     def curved_plane_refocus(self, stack_zyx, grid=20, patch=50, mask=None):
         Z, H, W = stack_zyx.shape
         ys = np.linspace(patch // 2, H - patch // 2 - 1, grid).astype(int)
         xs = np.linspace(patch // 2, W - patch // 2 - 1, grid).astype(int)
-
         pts, zs = [], []
         for y in ys:
             for x in xs:
                 if mask is not None and not mask[y, x]:
                     continue
                 sl = (slice(y - patch // 2, y + patch // 2), slice(x - patch // 2, x + patch // 2))
-                f = np.array([self.focus_score(stack_zyx[z][sl]) for z in range(Z)], dtype=np.float32)
+                f = np.array([float(np.std(sobel(np.asarray(self.to_gray(stack_zyx[z][sl]), dtype=float)))) for z in range(Z)], dtype=np.float32)
                 pts.append((x, y))
                 zs.append(int(np.argmax(f)))
 
@@ -554,10 +539,7 @@ class DeviceSegmentationApp:
                 selected_lif=self._selected_lif,
                 image_index=idx,
             )
-            self.last_z_step_um = z_um
-            self.last_y_step_um = y_um
-            self.last_x_step_um = x_um
-            self.last_xy_step_um = np.nanmean([v for v in [x_um, y_um] if v is not None]) if (x_um is not None or y_um is not None) else None
+            self.set_last_voxel_steps(z_um, y_um, x_um)
         else:
             arr = np.asarray(stack)
 
@@ -607,9 +589,6 @@ class DeviceSegmentationApp:
         return out
 
     # -------- segmentation + geometry --------
-    def is_color_image_2d(self, arr: np.ndarray) -> bool:
-        return arr.ndim == 3 and arr.shape[-1] in (3, 4) and arr.shape[0] > 32 and arr.shape[1] > 32
-
     def scale_to_uint8_view(self, arr):
         if arr is None:
             return None
@@ -629,37 +608,8 @@ class DeviceSegmentationApp:
         start = np.argmin(c[:, 0] + c[:, 1])
         return np.roll(c, -start, axis=0)
 
-    def crop_rectified_from_corners(self, in_focus_plane: np.ndarray, corners_xy: np.ndarray):
-        if corners_xy is None:
-            return None
-        c = self.order_corners_clockwise(corners_xy)
-        w1 = np.hypot(c[1, 0] - c[0, 0], c[1, 1] - c[0, 1])
-        w2 = np.hypot(c[2, 0] - c[3, 0], c[2, 1] - c[3, 1])
-        h1 = np.hypot(c[3, 0] - c[0, 0], c[3, 1] - c[0, 1])
-        h2 = np.hypot(c[2, 0] - c[1, 0], c[2, 1] - c[1, 1])
-        width = int(max(w1, w2))
-        height = int(max(h1, h2))
-        if width <= 1 or height <= 1:
-            return None
-
-        dst = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype=float)
-        tform = ProjectiveTransform()
-        if not tform.estimate(dst, c):
-            return None
-        warped = warp(in_focus_plane, tform, output_shape=(height, width), order=1, preserve_range=True)
-        return warped.astype(in_focus_plane.dtype)
-
-    def crop_rectified_stack_from_corners(self, stack: np.ndarray, corners_xy: np.ndarray):
-        # C3: delegate to the unified crop_rectified method
-        return self.crop_rectified(stack, corners_xy)
-
     def crop_rectified(self, data: np.ndarray, corners_xy: np.ndarray):
-        """C3: unified crop for 2-D planes, 3-D stacks, and 4-D stacks (z, h, w, c).
-
-        Replaces the separate crop_rectified_stack_from_corners path; the 2-D
-        crop_rectified_from_corners still handles the single-plane case directly
-        for clarity.
-        """
+        """Unified projective crop for 2-D planes, 3-D stacks, and 4-D stacks (z, h, w, c)."""
         if corners_xy is None or data is None:
             return None
         c = self.order_corners_clockwise(corners_xy)
@@ -696,12 +646,6 @@ class DeviceSegmentationApp:
             return None
 
         return warped.astype(data.dtype)
-
-    def signed_orientation(self, region):
-        img = binary_fill_holes(region.image).astype(float)
-        mu = moments_central(img)
-        angle_rad = 0.5 * np.arctan2(2 * mu[1, 1], mu[2, 0] - mu[0, 2])
-        return np.rad2deg(angle_rad)
 
     def corners_touch_border(self, corners_xy: np.ndarray, shape, margin=0):
         H, W = shape
@@ -810,29 +754,7 @@ class DeviceSegmentationApp:
 
                 # If Otsu (or eroded Otsu) still out of range, try threshold_minimum
                 if area_frac_otsu < 0.02 or area_frac_otsu > 0.15:
-                    # threshold_minimum can hang indefinitely in C code —
-                    # run it in a subprocess with a hard kill timeout.
-                    import multiprocessing as _mp_min, tempfile as _tf_min
-                    _tmp_min = _tf_min.mktemp(suffix=".npy")
-                    _proc_min = _mp_min.Process(
-                        target=mp_run_threshold_minimum,
-                        args=(inverted, _tmp_min),
-                    )
-                    _proc_min.start()
-                    _proc_min.join(timeout=30)
-                    if _proc_min.is_alive():
-                        _proc_min.kill()
-                        _proc_min.join(timeout=5)
-                        thresh = threshold_otsu(inverted)
-                    elif _proc_min.exitcode != 0:
-                        thresh = threshold_otsu(inverted)
-                    else:
-                        thresh = float(np.load(_tmp_min)[0])
-                    try:
-                        import os as _os_min
-                        _os_min.remove(_tmp_min)
-                    except OSError:
-                        pass
+                    thresh = threshold_minimum(inverted, max_num_iter=500)
                     min_binary = remove_small_holes(inverted > thresh, area_threshold=hole_cutoff)
                     labelled = label(min_binary)
                     props = regionprops(labelled)
@@ -1005,7 +927,8 @@ class DeviceSegmentationApp:
         pad = base_selem.shape[0] // 2
 
         for region in regionprops(labels_to_dilate):
-            angle_to_rotate = self.signed_orientation(region)
+            mu_r = moments_central(binary_fill_holes(region.image).astype(float))
+            angle_to_rotate = np.rad2deg(0.5 * np.arctan2(2 * mu_r[1, 1], mu_r[2, 0] - mu_r[0, 2]))
             rotated_selem = rotate(base_selem.astype(float), angle=90 + angle_to_rotate, reshape=False, order=0) > 0.5
 
             minr, minc, maxr, maxc = region.bbox
@@ -1031,9 +954,7 @@ class DeviceSegmentationApp:
         hough_attempts_log = []
 
         corners, angle_rad, centroid_xy = self.oriented_rect_corners_crop_necks_and_flares(device_mask)
-        # Check if device mask itself touches the image border (more reliable
-        # than only checking the oriented-rectangle corners, which can be
-        # pulled inward by neck/flare cropping).
+        # Check if device mask itself touches the image border 
         h, w = device_mask.shape
         mask_touches_border = (
             device_mask[0, :].any() or device_mask[-1, :].any() or
@@ -1097,12 +1018,7 @@ class DeviceSegmentationApp:
                         lg += 100
                         lt += 5
 
-                    segs = probabilistic_hough_line(
-                        edges,
-                        line_length=ll,
-                        line_gap=lg,
-                        threshold=lt,
-                    )
+                    segs = probabilistic_hough_line(edges, line_length=ll, line_gap=lg, threshold=lt)
                     reconstructed = np.zeros_like(edges, dtype=bool)
                     for (x0, y0), (x1, y1) in segs:
                         rr, cc = line(y0, x0, y1, x1)
@@ -1166,7 +1082,7 @@ class DeviceSegmentationApp:
             final_angle_rad = 0.0
             final_centroid_xy = np.array([w / 2.0, h / 2.0])
 
-        cropped_rotated = self.crop_rectified_from_corners(in_focus_plane, final_corners)
+        cropped_rotated = self.crop_rectified(in_focus_plane, final_corners)
 
         if return_debug:
             debug = {
@@ -1287,15 +1203,8 @@ class DeviceSegmentationApp:
         self.reset_image_choices()
         self.update_segment_button()
 
-    def segment_and_view(
-        self,
-        image_choice: str,
-        focus_downsample: int,
-        focus_n_sampling: int,
-        focus_patch: int,
-        mask_central_region,
-        clear_layers: bool,
-    ):
+    def segment_and_view(self, image_choice: str, focus_downsample: int, focus_n_sampling: int,
+        focus_patch: int, mask_central_region, clear_layers: bool):
         source_is_lif = bool(getattr(self, "_selected_lif", None) and self._selected_lif.exists())
 
         if not source_is_lif and not self.image_paths:
@@ -1347,8 +1256,8 @@ class DeviceSegmentationApp:
 
                 z_um, y_um, x_um = read_voxel_size_um(Path(source_path), source_is_lif=False)
                 self.set_last_voxel_steps(z_um, y_um, x_um)
-
-                if self.is_color_image_2d(arr) or arr.ndim < 3:
+                is_color_2d = arr.ndim == 3 and arr.shape[-1] in (3, 4) and arr.shape[0] > 32 and arr.shape[1] > 32
+                if is_color_2d or arr.ndim < 3:
                     in_focus_plane = arr.astype(np.float32)
                     self.last_stack = None
                     self.last_focus_downsample = 1
@@ -1395,7 +1304,6 @@ class DeviceSegmentationApp:
         self.last_organoid_region = organoid_region.astype(bool) if organoid_region is not None else None
         self.device_width_ok.device_width_um.enabled = True
         self.device_width_ok.device_width_um.value = 30.0
-
 
         self.add_layer_if_nonzero(in_focus_plane, name="original", layer_type="image")
 
@@ -1574,7 +1482,7 @@ class DeviceSegmentationApp:
                 y1 = min(H, y + half)
                 x0 = max(0, x - half)
                 x1 = min(W, x + half)
-                f = np.array([self.focus_score(stack_gray[z, y0:y1, x0:x1]) for z in range(Z)], dtype=np.float32)
+                f = np.array([float(np.std(sobel(np.asarray(self.to_gray(stack_gray[z, y0:y1, x0:x1]), dtype=float)))) for z in range(Z)], dtype=np.float32)
                 best_z = int(np.argmax(f))
                 counts[best_z] += 1
         return counts
@@ -1602,7 +1510,7 @@ class DeviceSegmentationApp:
                 if refocused is not None:
                     stack_for_crop = refocused
 
-            cropped_stack = self.crop_rectified_stack_from_corners(stack_for_crop, corners_xy * float(scale))
+            cropped_stack = self.crop_rectified(stack_for_crop, corners_xy * float(scale))
             if cropped_stack is None:
                 self.images_output.value = "[WARN] Crop failed for selected geometry (stack)."
                 return
@@ -1610,7 +1518,7 @@ class DeviceSegmentationApp:
             roi_inner_xy = self.get_current_roi_corners_xy()
             roi_stack_only = None
             if roi_inner_xy is not None:
-                roi_stack_only = self.crop_rectified_stack_from_corners(stack_for_crop, roi_inner_xy * float(scale))
+                roi_stack_only = self.crop_rectified(stack_for_crop, roi_inner_xy * float(scale))
             self._last_geometry_vote_counts = None
 
             self._cropped_stack_xy_raw = cropped_stack
@@ -1652,10 +1560,7 @@ class DeviceSegmentationApp:
                     organoid_mask = np.pad(organoid_mask, ((0, 0), (0, pad_w)), mode="constant", constant_values=False)
                 organoid_mask = organoid_mask[:target_h, :target_w]
 
-                cropped_organoid = self.crop_rectified_from_corners(
-                    organoid_mask.astype(np.float32),
-                    corners_xy * float(scale),
-                )
+                cropped_organoid = self.crop_rectified(organoid_mask.astype(np.float32), corners_xy * float(scale))
                 if cropped_organoid is not None:
                     self._cropped_organoid_mask_xy_raw = np.asarray(cropped_organoid > 0.5, dtype=bool)
 
@@ -1664,7 +1569,7 @@ class DeviceSegmentationApp:
             self.images_output.value = "[OK] Cropped aligned stack created from current geometry."
             return
 
-        cropped_img = self.crop_rectified_from_corners(self.last_image, corners_xy)
+        cropped_img = self.crop_rectified(self.last_image, corners_xy)
         if cropped_img is None:
             self.images_output.value = "[WARN] Crop failed for selected geometry."
             return

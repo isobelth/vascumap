@@ -6,7 +6,6 @@ Extracted from bel_skeletonisation.ipynb for pipeline integration.
 
 import numpy as np
 import pandas as pd
-
 import cupy as cp
 import cupyx.scipy.ndimage as ndi_gpu
 import dask.array as da
@@ -16,17 +15,12 @@ import networkx as nx
 from scipy.spatial.distance import cdist
 from scipy.spatial import ConvexHull, Delaunay
 from scipy.ndimage import distance_transform_edt as edt
-from scipy import ndimage as ndi
 from scipy.ndimage import maximum_filter
 from utils import cupy_chunk_processing
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from matplotlib.colors import Normalize
 
-
-# ---------------------------------------------------------------------------
-# Helper utilities
-# ---------------------------------------------------------------------------
 
 def safe_divide(numerator, denominator):
     """Divide numerator by denominator, returning NaN if denominator is zero or negative."""
@@ -35,7 +29,6 @@ def safe_divide(numerator, denominator):
         return np.nan
     return float(numerator) / denominator
 
-
 def safe_median(values):
     """Compute the median of values, returning NaN if no finite values are available."""
     arr = np.asarray(pd.to_numeric(values, errors='coerce'), dtype=float).ravel()
@@ -43,7 +36,6 @@ def safe_median(values):
     if arr.size == 0:
         return np.nan
     return float(np.median(arr))
-
 
 def safe_percentile_spread(values, low=10, high=90):
     """Return the spread between the low and high percentiles of values."""
@@ -54,11 +46,9 @@ def safe_percentile_spread(values, low=10, high=90):
     q = np.percentile(arr, [low, high])
     return float(q[1] - q[0])
 
-
 def trim_segmentation(segmentation, fill_threshold=0.75):
     """Trim top/bottom slices where the fill fraction exceeds *fill_threshold*.
-
-    Only peels from the outer edges — middle slices are never removed.
+    Only trims the outer edges.
 
     Returns:
         (trimmed_segmentation, keep_start, keep_stop)  where keep_stop is
@@ -74,17 +64,11 @@ def trim_segmentation(segmentation, fill_threshold=0.75):
     keep_stop = keep_end + 1
     return segmentation[keep_start:keep_stop], keep_start, keep_stop
 
-
-# ---------------------------------------------------------------------------
-# Skeleton / graph helpers
-# ---------------------------------------------------------------------------
-
 def measure_edge_length(coordinates):
     """Sum the Euclidean lengths of polyline segments defined by coordinates."""
     differences = np.diff(coordinates, axis=0)
     segment_lengths = np.linalg.norm(differences, axis=1)
     return np.sum(segment_lengths)
-
 
 def prune_graph(graph, area_3d, edt_cutoff=0.25, length_cutoff=25):
     """Iteratively remove short or thin terminal branches from the vessel graph."""
@@ -118,7 +102,6 @@ def prune_graph(graph, area_3d, edt_cutoff=0.25, length_cutoff=25):
         if len(values) == 0:
             break
     return graph
-
 
 def remove_mid_node(graph):
     """Remove degree-2 nodes by merging their two edges into one."""
@@ -172,18 +155,15 @@ def remove_mid_node(graph):
 
 
 def classify_sprout_edges(graph):
-    """Classify every edge of *graph* as ``'branch'``, ``'attached_sprout'``
+    """Classify every edge of graph as ``'branch'``, ``'attached_sprout'``
     or ``'floating_sprout'``.
 
-    A **floating sprout** is, by definition, an edge belonging to a
-    connected component of exactly two nodes, both of degree 1
-    (an isolated 2-node fragment whose only edge connects two tips).
-    An **attached sprout** is any other edge with at least one degree-1
-    endpoint (one tip dangling off the connected network). Everything
-    else is a **branch**.
+    **Floating sprout**: edge between two nodes, each with degree 1
+    **Attached sprout**: edge with one degree-1 node
+    **Branch**: Everythign else
 
     Returns a dict mapping the edge tuple ``(u, v)`` (in iteration order)
-    to one of the three strings.
+    to one of the three edge classifications.
     """
     floating_nodes = set()
     for cc in nx.connected_components(graph):
@@ -204,80 +184,54 @@ def classify_sprout_edges(graph):
 
 
 def build_branch_only_graph(graph):
-    """Return a sprout-collapsed copy of *graph* for branch-geometry stats.
-
-    A junction that only has degree > 2 because it carries a sprout
-    (e.g. ``A — J — B`` with a tip ``S`` hanging off ``J``) artificially
-    splits a single real ``A — B`` vessel into two short edges in the
-    cleaned graph, biasing every ``*_branch_*`` length / tortuosity /
-    calibre statistic. To remove that bias we drop every degree-1
-    (sprout) node and then re-run mid-node collapse: junctions like
-    ``J`` that fall from degree 3 to degree 2 once ``S`` is removed are
-    merged so that ``A — J — B`` becomes a single ``A — B`` edge whose
-    polyline is the concatenation of the two original polylines.
-
-    Junction counts, junction connectivity, sprout-side stats and
-    densities are *not* computed from this graph — they continue to use
-    the original cleaned graph so that a sprout-bearing junction still
-    counts as a junction.
+    """Trim sprouts and re-run the mid-node collapse. See ANALYSIS_README for diagramatic
+    explanation.
     """
     g = graph.copy()
     g.remove_nodes_from([n for n in list(g.nodes())
                          if g.nodes[n].get('sprout', False)])
-    # Some former junctions may now be orphaned degree-0/1 nodes (e.g.
-    # a short A—J—S chain whose A was itself only kept because of
-    # another sprout). Iteratively drop them so they don't reintroduce
-    # sprout-like terminations into the branch-only view. We do not
-    # mark them as sprouts; we just remove them.
-    while True:
-        leftover = [n for n, d in g.degree() if d <= 1]
-        if not leftover:
-            break
-        g.remove_nodes_from(leftover)
+    isolated = [n for n, d in g.degree() if d == 0]
+    if isolated:
+        g.remove_nodes_from(isolated)
     return remove_mid_node(g)
 
+def prune_out_of_bounds_edges(graph, image_shape, organoid_mask=None,
+                              vicinity_xy=50, inplace=False):
+    """Remove graph edges that pass too close to the XY border or through an
+    optional exclusion mask, in a single pass.
 
-def collect_border_vicinity_edges(graph, image_shape, vicinity_xy=50, inplace=False):
-    """Remove graph edges that pass within vicinity_xy pixels of the image XY border."""
-    border_vicinity_edges = set()
+    Edges are removed if any of their polyline points satisfies either:
+      * lies within ``vicinity_xy`` pixels of the XY border of ``image_shape``, or
+      * falls inside ``organoid_mask`` (if provided).
+
+    Isolated (degree-0) nodes left behind by edge removal are dropped.
+    Pass ``inplace=True`` to mutate ``graph`` directly and skip the copy.
+    """
+    y_max = image_shape[1] - 1
+    x_max = image_shape[2] - 1
+    has_mask = organoid_mask is not None
+    mask_h = organoid_mask.shape[0] if has_mask else 0
+    mask_w = organoid_mask.shape[1] if has_mask else 0
+
+    edges_to_remove = []
     for u, v in graph.edges():
         try:
             pts = graph[u][v]['pts']
-            if any((
-                pt[1] < vicinity_xy or pt[1] > image_shape[1] - 1 - vicinity_xy or
-                pt[2] < vicinity_xy or pt[2] > image_shape[2] - 1 - vicinity_xy
-                ) for pt in pts):
-                border_vicinity_edges.add((u, v))
         except KeyError:
             continue
+        for pt in pts:
+            y, x = int(pt[1]), int(pt[2])
+            if (y < vicinity_xy or y > y_max - vicinity_xy
+                    or x < vicinity_xy or x > x_max - vicinity_xy):
+                edges_to_remove.append((u, v))
+                break
+            if has_mask and 0 <= y < mask_h and 0 <= x < mask_w \
+                    and organoid_mask[y, x]:
+                edges_to_remove.append((u, v))
+                break
 
-    # B3: skip copy when caller has already done it
     g = graph if inplace else graph.copy()
-    edges_to_remove = [edge for edge in border_vicinity_edges if g.has_edge(*edge)]
-    g.remove_edges_from(edges_to_remove)
-
-    isolated_nodes = [node for node in g.nodes() if g.degree[node] == 0]
-    if isolated_nodes:
-        g.remove_nodes_from(isolated_nodes)
-
-    return g
-
-
-def collect_exclusion_zone_edges(graph, exclusion_mask_xy, inplace=False):
-    """Remove graph edges that pass through the exclusion zone (e.g. organoid region)."""
-    exclusion_edges = set()
-    for u, v in graph.edges():
-        try:
-            pts = graph[u][v]['pts']
-            if any(exclusion_mask_xy[int(pt[1]), int(pt[2])] for pt in pts):
-                exclusion_edges.add((u, v))
-        except (KeyError, IndexError):
-            continue
-
-    # B3: skip copy when caller has already done it
-    g = graph if inplace else graph.copy()
-    edges_to_remove = [e for e in exclusion_edges if g.has_edge(*e)]
-    g.remove_edges_from(edges_to_remove)
+    g.remove_edges_from([e for e in edges_to_remove if g.has_edge(*e)])
 
     isolated = [n for n in g.nodes() if g.degree[n] == 0]
     if isolated:
@@ -356,16 +310,14 @@ def graph2image(graph, shape):
 
 
 def orientation_to_device_axis_deg(pts_um, device_axis='x'):
-    """Return acute branch orientation angle (deg) relative to device axis in XY plane.
-
-    The device segmentation step rectifies/crops to the device frame, so the
-    device long axis is treated as the +X axis in this aligned space.
+    """Return the branch orientation (0°->90°) relative to the long device axis (XY plane only)
+    0° aligned, 90° orthogonal
     """
     if pts_um is None or len(pts_um) < 2:
         return np.nan
 
     vec = np.asarray(pts_um[-1] - pts_um[0], dtype=float)
-    # XY plane in array coordinates is (x, y) -> indices (2, 1)
+    # pts_um[0] is the (z, y, x) µm coordinate of the branch start, pts_um[-1] is the end
     vec_xy = np.asarray([vec[2], vec[1]], dtype=float)
     norm = float(np.linalg.norm(vec_xy))
     if not np.isfinite(norm) or norm <= 1e-8:
@@ -374,7 +326,7 @@ def orientation_to_device_axis_deg(pts_um, device_axis='x'):
     unit = vec_xy / norm
     axis_xy = np.array([1.0, 0.0], dtype=float) if str(device_axis).lower() == 'x' else np.array([0.0, 1.0], dtype=float)
     dot = float(np.clip(np.abs(np.dot(unit, axis_xy)), -1.0, 1.0))
-    # Acute angle to axis: 0° aligned, 90° orthogonal
+
     return float(np.degrees(np.arccos(dot)))
 
 
@@ -698,11 +650,7 @@ def compute_all_morphological_params(
 #   1. Shape-invariant (no field-of-view-dependent quantities)
 #   2. Biologically interpretable
 #   3. Small enough for PCA / clustering with modest sample sizes
-#
-# Every column listed here MUST also appear in the full
-# `all_morphological_params_df`, so the curated panel is a strict subset of
-# the full audit file. See `vascumap/Analysis_README.md` for the per-feature
-# mathematical and biological description.
+#  see Analysis_README.md` for full mathematical and biological descriptions
 ANALYSIS_METRICS_COLUMNS = [
     # Density (5)
     'vessel_volume_fraction',
@@ -752,157 +700,150 @@ def build_curated_analysis_metrics_df(all_params_df):
 # Network headline metrics
 # ---------------------------------------------------------------------------
 
-def summarize_network_headline_metrics(graph, area_image, voxel_size_um=(2.0, 2.0, 2.0), distance_mode='skeleton', device_axis='x'):
-    """Compute distance-based network-level headline statistics.
+def summarize_network_headline_metrics(graph, voxel_size_um=(2.0, 2.0, 2.0)):
+    """Compute nearest-neighbour distance summaries between same-type nodes
+    (junction↔junction, sprout↔sprout) using both skeleton (Dijkstra along
+    the vessel graph, weighted by polyline µm length) and euclidean
+    (straight-line µm) distance.
 
-    Per-edge aggregates (orientation / length / cross-sectional area)
-    are owned by :func:`compute_all_morphological_params`; this function
-    only emits the nearest-neighbour distance summaries, which are tagged
-    with a mode infix (``_skeleton_dist_`` or ``_euclidean_dist_``) so
-    they never collide with the per-junction Euclidean disaggregated
-    stats from :func:`compute_junction_metrics_df`. ``area_image`` is
-    accepted for backwards compatibility but unused.
+    Returns a dict with eight keys of the form
+    ``{median,spread}_{junction,sprout}_{skeleton,euclidean}_dist_nearest_{junction,endpoint}``.
     """
-    del area_image  # accepted for back-compat; orientation/length now in aggregator
     voxel_size_um = np.asarray(voxel_size_um, dtype=float)
-    mode_tag = str(distance_mode).lower()
-    if mode_tag not in ('skeleton', 'euclidean'):
-        mode_tag = 'skeleton'
     summary = {
-        f'median_junction_{mode_tag}_dist_nearest_junction': np.nan,
-        f'spread_junction_{mode_tag}_dist_nearest_junction': np.nan,
-        f'median_sprout_{mode_tag}_dist_nearest_endpoint': np.nan,
-        f'spread_sprout_{mode_tag}_dist_nearest_endpoint': np.nan,
+        f'{agg}_{role}_{mode}_dist_nearest_{target}': np.nan
+        for agg in ('median', 'spread')
+        for role, target in (('junction', 'junction'), ('sprout', 'endpoint'))
+        for mode in ('skeleton', 'euclidean')
     }
 
     nodes = list(graph.nodes())
     if len(nodes) < 2:
         return summary
 
-    positions = np.array([graph.nodes[n]['pts'] for n in nodes])
-    positions_um = positions.astype(float) * voxel_size_um[None, :]
+    positions_um = (np.array([graph.nodes[n]['pts'] for n in nodes], dtype=float)
+        * voxel_size_um[None, :])
     node_type = np.array(['sprout' if graph.nodes[n]['sprout'] else 'junction' for n in nodes])
+    junction_nodes = [n for n, t in zip(nodes, node_type) if t == 'junction']
+    sprout_nodes = [n for n, t in zip(nodes, node_type) if t == 'sprout']
 
-    if distance_mode == 'skeleton':
-        graph_weighted = graph.copy()
-        for u, v, data in graph_weighted.edges(data=True):
-            pts = data.get('pts', None)
-            if pts is None or len(pts) < 2:
-                graph_weighted.edges[u, v]['path_length_um'] = np.inf
-                continue
-            pts_um = np.asarray(pts, dtype=float) * voxel_size_um[None, :]
-            seg_lengths = np.linalg.norm(np.diff(pts_um, axis=0), axis=1)
-            graph_weighted.edges[u, v]['path_length_um'] = float(np.sum(seg_lengths))
+    # ---- distance keeping within the skeleton (Dijkstra) ----
+    graph_weighted = graph.copy()
+    for u, v, data in graph_weighted.edges(data=True):
+        pts = data.get('pts', None)
+        if pts is None or len(pts) < 2:
+            graph_weighted.edges[u, v]['path_length_um'] = np.inf
+            continue
+        pts_um = np.asarray(pts, dtype=float) * voxel_size_um[None, :]
+        graph_weighted.edges[u, v]['path_length_um'] = float(
+            np.linalg.norm(np.diff(pts_um, axis=0), axis=1).sum()
+        )
 
-        # B2: only run Dijkstra from nodes of each relevant type and record the
-        # nearest-neighbour distance — avoids building an O(N²) distance matrix.
-        junction_nodes = [n for n, t in zip(nodes, node_type) if t == 'junction']
-        sprout_nodes   = [n for n, t in zip(nodes, node_type) if t == 'sprout']
-        junction_set   = set(junction_nodes)
-        sprout_set     = set(sprout_nodes)
+    def nearest_skeleton(source_list, same_set):
+        nearest = []
+        for source in source_list:
+            lengths = nx.single_source_dijkstra_path_length(
+                graph_weighted, source, weight='path_length_um'
+            )
+            others = [d for target, d in lengths.items()
+                      if target in same_set and target != source and np.isfinite(d)]
+            if others:
+                nearest.append(min(others))
+        return nearest
 
-        def _nearest_same_type(source_list, same_set):
-            nearest = []
-            for source in source_list:
-                lengths = nx.single_source_dijkstra_path_length(
-                    graph_weighted, source, weight='path_length_um'
-                )
-                others = [d for target, d in lengths.items()
-                          if target in same_set and target != source and np.isfinite(d)]
-                if others:
-                    nearest.append(min(others))
-            return nearest
+    # ---- euclidean ----
+    def nearest_euclidean(pos):
+        if len(pos) < 2:
+            return []
+        d = cdist(pos, pos)
+        np.fill_diagonal(d, np.inf)
+        near = np.min(d, axis=1)
+        return list(near[np.isfinite(near)])
 
-        junction_nearest = _nearest_same_type(junction_nodes, junction_set)
-        sprout_nearest   = _nearest_same_type(sprout_nodes,   sprout_set)
-    else:
-        # Euclidean: still build sub-distance matrices but only for same-type nodes
-        junction_mask  = node_type == 'junction'
-        sprout_mask    = node_type == 'sprout'
-        pos_junc       = positions_um[junction_mask]
-        pos_sprout     = positions_um[sprout_mask]
+    junction_set = set(junction_nodes)
+    sprout_set = set(sprout_nodes)
+    pos_junc = positions_um[node_type == 'junction']
+    pos_sprout = positions_um[node_type == 'sprout']
 
-        def _nearest_euclidean(pos):
-            if len(pos) < 2:
-                return []
-            d = cdist(pos, pos)
-            np.fill_diagonal(d, np.inf)
-            near = np.min(d, axis=1)
-            return list(near[np.isfinite(near)])
+    nearest_values = {
+        ('junction', 'skeleton'):  nearest_skeleton(junction_nodes, junction_set),
+        ('sprout',   'skeleton'):  nearest_skeleton(sprout_nodes,   sprout_set),
+        ('junction', 'euclidean'): nearest_euclidean(pos_junc),
+        ('sprout',   'euclidean'): nearest_euclidean(pos_sprout),
+    }
 
-        junction_nearest = _nearest_euclidean(pos_junc)
-        sprout_nearest   = _nearest_euclidean(pos_sprout)
-
-    if junction_nearest:
-        summary[f'median_junction_{mode_tag}_dist_nearest_junction'] = safe_median(junction_nearest)
-        summary[f'spread_junction_{mode_tag}_dist_nearest_junction'] = safe_percentile_spread(junction_nearest)
-
-    if sprout_nearest:
-        summary[f'median_sprout_{mode_tag}_dist_nearest_endpoint'] = safe_median(sprout_nearest)
-        summary[f'spread_sprout_{mode_tag}_dist_nearest_endpoint'] = safe_percentile_spread(sprout_nearest)
+    for (role, mode), values in nearest_values.items():
+        if not values:
+            continue
+        target = 'junction' if role == 'junction' else 'endpoint'
+        summary[f'median_{role}_{mode}_dist_nearest_{target}'] = safe_median(values)
+        summary[f'spread_{role}_{mode}_dist_nearest_{target}'] = safe_percentile_spread(values)
 
     return summary
 
 
 # ---------------------------------------------------------------------------
-# Internal pore visualisation helpers
-# ---------------------------------------------------------------------------
-# Note: pore *metrics* (median area, spread, inscribed radius, …) were
-# removed from the analysis pipeline because they were noisy 2D
-# slice-by-slice estimates that largely duplicated information already
-# captured by ``branches_per_volume``, ``median_branch_median_cs_area``
-# and ``skeleton_lacunarity``. The label-volume helper below is kept
-# because ``vascumap/core.py`` still uses it to save interim ``_holes``
-# arrays for napari visualisation.
-
-
-def build_internal_pore_label_volumes(
-    mask,
-    voxel_size_um=(2.0, 2.0, 2.0),
-    max_pore_area_fraction_of_slice=0.15,
-):
-    """Build per-slice pore label and distance volumes for napari visualisation.
-
-    Returns:
-        (holes, hole_labels_per_slice, hole_distance_per_slice_um) as numpy arrays.
-    """
-    voxel_size_um = np.asarray(voxel_size_um, dtype=float)
-    holes = np.zeros_like(mask, dtype=np.uint8)
-    hole_labels_per_slice = np.zeros_like(mask, dtype=np.int32)
-    hole_distance_per_slice_um = np.zeros_like(mask, dtype=np.float32)
-
-    for z in range(mask.shape[0]):
-        vessel_slice = mask[z].astype(bool)
-        filled_slice = ndi.binary_fill_holes(vessel_slice)
-        internal_pores = filled_slice & ~vessel_slice
-
-        labeled, n_labels = ndi.label(internal_pores, structure=np.ones((3, 3), dtype=np.uint8))
-        if n_labels == 0:
-            continue
-
-        area_counts = np.bincount(labeled.ravel(), minlength=n_labels + 1).astype(np.float64)
-        max_pore_area_px = float(max_pore_area_fraction_of_slice) * float(vessel_slice.size)
-        valid_label_mask = (area_counts > 0) & (area_counts <= max_pore_area_px)
-        valid_label_mask[0] = False
-
-        filtered_pores_slice = valid_label_mask[labeled]
-        holes[z] = filtered_pores_slice.astype(np.uint8)
-
-        relabeled_slice, _ = ndi.label(filtered_pores_slice, structure=np.ones((3, 3), dtype=np.uint8))
-        hole_labels_per_slice[z] = relabeled_slice.astype(np.int32)
-
-        if np.any(filtered_pores_slice):
-            hole_distance_per_slice_um[z] = edt(
-                filtered_pores_slice,
-                sampling=tuple(voxel_size_um[1:]),
-            ).astype(np.float32)
-
-    return holes, hole_labels_per_slice, hole_distance_per_slice_um
-
-
-# ---------------------------------------------------------------------------
 # Skeleton overview visualisation
 # ---------------------------------------------------------------------------
+
+def overlay_skeleton_on_seg(seg_bg, skeleton_volume):
+    """Composite cyan skeleton voxels onto a dim segmentation background."""
+    thick = maximum_filter(np.sum(skeleton_volume.astype(np.float32), axis=0), size=3)
+    rgb = np.stack([seg_bg * 0.40] * 3, axis=-1)
+    rgb[thick > 0] = np.array([0.0, 1.0, 1.0])  # cyan
+    return np.clip(rgb, 0, 1)
+
+
+def edge_diameters(graph, binary_edt):
+    """Median diameter (µm) per edge from the 3D EDT sampled along each polyline."""
+    diams = []
+    shape_max = [s - 1 for s in binary_edt.shape]
+    for u, v in graph.edges():
+        try:
+            pts = np.clip(graph[u][v]['pts'].astype(int), [0, 0, 0], shape_max)
+            radii = binary_edt[pts[:, 0], pts[:, 1], pts[:, 2]]
+            diams.append(float(np.median(radii)) * 2.0)
+        except (KeyError, IndexError):
+            diams.append(0.0)
+    return diams
+
+
+def edge_orientations(graph):
+    """Per-edge orientation (degrees) relative to the device axis."""
+    orientations = []
+    for u, v in graph.edges():
+        try:
+            pts = graph[u][v]['pts'].astype(float)
+            orientations.append(orientation_to_device_axis_deg(pts))
+        except (KeyError, IndexError):
+            orientations.append(np.nan)
+    return orientations
+
+
+def draw_graph_panel(ax, graph, edge_values, scalar_mappable, background, title):
+    """Draw ``graph`` on ``ax`` over ``background``, edges coloured by ``edge_values``."""
+    ax.imshow(background)
+    for (u, v), val in zip(graph.edges(), edge_values):
+        try:
+            pts = graph[u][v]['pts'].astype(int)
+            color = scalar_mappable.to_rgba(val) if np.isfinite(val) else (0.5, 0.5, 0.5, 1.0)
+            ax.plot(pts[:, 2], pts[:, 1], color=color, linewidth=2.0, solid_capstyle='round')
+        except (KeyError, IndexError):
+            continue
+    nx_x, nx_y, nc = [], [], []
+    for node in graph.nodes():
+        pos = graph.nodes[node]['pts']
+        if pos.ndim > 1:
+            pos = pos[0]
+        nx_x.append(pos[2])
+        nx_y.append(pos[1])
+        nc.append('limegreen' if graph.degree(node) == 1 else 'white')
+    if nx_x:
+        ax.scatter(nx_x, nx_y, c=nc, s=12, alpha=0.9, zorder=5)
+    ax.set_title(f'{title}\n({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)',
+                 fontsize=13)
+    ax.set_aspect('equal', adjustable='box')
+
 
 def generate_skeleton_overview_plot(segmentation, analysis_results, title="", save_path=None,
                                     brightfield_stack=None, organoid_mask_xy=None,
@@ -910,22 +851,19 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
                                     organoid_mask_full_xy=None):
     """Generate and optionally save the 6-panel skeleton/graph overview plot.
 
-    Panels: (0) full XY plane with device geometry and tumour overlay,
-    (1) cropped brightfield (no overlay), (2) reconstructed vasculature sum projection,
-    (3) full skeleton overlay, (4) clean skeleton overlay,
-    (5) pruned clean graph.
+    Panels: (0) full XY plane with device geometry and organoid overlay,
+    (1) cropped brightfield, (2) reconstructed vasculature sum projection,
+    (3) clean skeleton overlay, (4) clean graph coloured by diameter,
+    (5) clean graph coloured by orientation.
     """
-
-    skeleton = analysis_results['skeleton']
     clean_skeleton = analysis_results['skeleton_from_graph']
     clean_graph = analysis_results['clean_graph']
     binary_edt = analysis_results['binary_edt']
 
     nz = segmentation.shape[0]
-    seg_bool = segmentation.astype(bool)
-    seg_max = np.mean(seg_bool, axis=0).astype(np.float32)
+    seg_max = np.mean(segmentation.astype(bool), axis=0).astype(np.float32)
 
-    # Zero out tumour/organoid region on all segmentation-based panels
+    # Zero out organoid region on all segmentation-based panels
     if organoid_mask_xy is not None:
         org_mask = np.asarray(organoid_mask_xy, dtype=bool)
         if org_mask.shape == seg_max.shape:
@@ -933,95 +871,31 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
             seg_max[org_mask] = 0.0
 
     background = np.stack([seg_max * 0.40] * 3, axis=-1)
+    overlay_clean = overlay_skeleton_on_seg(seg_max, clean_skeleton)
 
-    _SKEL_COLOUR = np.array([0.0, 1.0, 1.0])  # cyan
+    clean_diams = edge_diameters(clean_graph, binary_edt)
+    positive_diams = [d for d in clean_diams if d > 0]
+    vmin = np.percentile(positive_diams, 5) * 0.5 if positive_diams else 0
+    vmax = np.percentile(positive_diams, 95) if positive_diams else 1
+    sm = cm.ScalarMappable(norm=Normalize(vmin=vmin, vmax=vmax), cmap=cm.magma)
 
-    def _make_overlay(seg_bg, arr):
-        thick = maximum_filter(np.sum(arr.astype(np.float32), axis=0), size=3)
-        rgb = np.stack([seg_bg * 0.40] * 3, axis=-1)
-        mask = thick > 0
-        rgb[mask] = _SKEL_COLOUR  # full-brightness cyan wherever skeleton is present
-        return np.clip(rgb, 0, 1)
-
-    overlay_skel = _make_overlay(seg_max, skeleton)
-    overlay_clean = _make_overlay(seg_max, clean_skeleton)
-
-    def _edge_diameters(g):
-        diams = []
-        for u, v in g.edges():
-            try:
-                pts = np.clip(g[u][v]['pts'].astype(int),
-                              [0, 0, 0],
-                              [s - 1 for s in binary_edt.shape])
-                radii = binary_edt[pts[:, 0], pts[:, 1], pts[:, 2]]
-                diams.append(float(np.median(radii)) * 2.0)
-            except (KeyError, IndexError):
-                diams.append(0.0)
-        return diams
-
-    clean_diams = _edge_diameters(clean_graph)
-
-    all_diams = [d for d in clean_diams if d > 0]
-    vmin = np.percentile(all_diams, 5) * 0.5 if all_diams else 0
-    vmax = np.percentile(all_diams, 95) if all_diams else 1
-    norm_g = Normalize(vmin=vmin, vmax=vmax)
-    sm = cm.ScalarMappable(norm=norm_g, cmap=cm.magma)
-
-    def _edge_orientations(g):
-        orientations = []
-        for u, v in g.edges():
-            try:
-                pts = g[u][v]['pts'].astype(float)
-                orientations.append(orientation_to_device_axis_deg(pts))
-            except (KeyError, IndexError):
-                orientations.append(np.nan)
-        return orientations
-
-    clean_orientations = _edge_orientations(clean_graph)
-
-    valid_orient = [o for o in clean_orientations if np.isfinite(o)]
-    norm_orient = Normalize(vmin=0, vmax=90)
-    sm_orient = cm.ScalarMappable(norm=norm_orient, cmap=cm.magma)
-
-    def _draw_graph(ax, g, edge_values, scalar_mappable, graph_title):
-        ax.imshow(background)
-        for (u, v), val in zip(g.edges(), edge_values):
-            try:
-                pts = g[u][v]['pts'].astype(int)
-                color = scalar_mappable.to_rgba(val) if np.isfinite(val) else (0.5, 0.5, 0.5, 1.0)
-                ax.plot(pts[:, 2], pts[:, 1],
-                        color=color, linewidth=2.0, solid_capstyle='round')
-            except (KeyError, IndexError):
-                continue
-        nx_x, nx_y, nc = [], [], []
-        for node in g.nodes():
-            pos = g.nodes[node]['pts']
-            if pos.ndim > 1:
-                pos = pos[0]
-            nx_x.append(pos[2])
-            nx_y.append(pos[1])
-            nc.append('limegreen' if g.degree(node) == 1 else 'white')
-        if nx_x:
-            ax.scatter(nx_x, nx_y, c=nc, s=12, alpha=0.9, zorder=5)
-        ax.set_title(f'{graph_title}\n({g.number_of_nodes()} nodes, {g.number_of_edges()} edges)',
-                     fontsize=13)
-        ax.set_aspect('equal', adjustable='box')
+    clean_orientations = edge_orientations(clean_graph)
+    sm_orient = cm.ScalarMappable(norm=Normalize(vmin=0, vmax=90), cmap=cm.magma)
 
     plt.style.use('dark_background')
     fig, ax = plt.subplots(ncols=6, figsize=(36, 16))
 
-    # ── Panel 0: full XY plane with device corners + tumour overlay ──────────
+    # ── Panel 0: full XY plane with device corners + organoid overlay ────────
     if brightfield_full is not None:
         bf_full = np.asarray(brightfield_full, dtype=np.float32)
         if bf_full.ndim == 3:
             bf_full = np.mean(bf_full, axis=-1)
-        bfmin, bfmax = bf_full.min(), bf_full.max()
-        bf_norm = (bf_full - bfmin) / max(float(bfmax - bfmin), 1e-6)
+        bf_norm = (bf_full - bf_full.min()) / max(float(bf_full.max() - bf_full.min()), 1e-6)
         rgb_full = np.stack([bf_norm] * 3, axis=-1)
         if organoid_mask_full_xy is not None:
-            omask = np.asarray(organoid_mask_full_xy, dtype=bool)
-            if omask.shape == bf_full.shape:
-                rgb_full[omask] = rgb_full[omask] * 0.5 + np.array([1.0, 0.0, 0.0]) * 0.5
+            organoid_mask = np.asarray(organoid_mask_full_xy, dtype=bool)
+            if organoid_mask.shape == bf_full.shape:
+                rgb_full[organoid_mask] = rgb_full[organoid_mask] * 0.5 + np.array([1.0, 0.0, 0.0]) * 0.5
         ax[0].imshow(np.clip(rgb_full, 0, 1))
         if device_corners_xy is not None:
             corners = np.asarray(device_corners_xy)
@@ -1029,7 +903,7 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
             ax[0].plot(closed[:, 0], closed[:, 1], color='yellow', linewidth=2)
         p0_title = 'Full plane + device geometry'
         if organoid_mask_full_xy is not None:
-            p0_title += '\n(tumour mask, red)'
+            p0_title += '\n(organoid mask, red)'
         ax[0].set_title(p0_title, fontsize=13)
     else:
         ax[0].axis('off')
@@ -1037,8 +911,7 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
     # ── Panel 1: cropped brightfield, no overlay ─────────────────────────────
     if brightfield_stack is not None:
         bf_2d = np.mean(brightfield_stack.astype(np.float32), axis=0)
-        bf_min, bf_max = bf_2d.min(), bf_2d.max()
-        bf_norm2 = (bf_2d - bf_min) / max(float(bf_max - bf_min), 1e-6)
+        bf_norm2 = (bf_2d - bf_2d.min()) / max(float(bf_2d.max() - bf_2d.min()), 1e-6)
         ax[1].imshow(bf_norm2, cmap='gray')
         ax[1].set_title('Cropped brightfield', fontsize=13)
     else:
@@ -1053,10 +926,11 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
     ax[3].set_title(f'Clean skeleton  ({int(clean_skeleton.sum()):,} voxels)', fontsize=13)
 
     # ── Panel 4: pruned clean graph (coloured by diameter) ──────────────────
-    _draw_graph(ax[4], clean_graph, clean_diams, sm, 'Clean graph — diameter')
+    draw_graph_panel(ax[4], clean_graph, clean_diams, sm, background, 'Clean graph — diameter')
 
     # ── Panel 5: pruned clean graph (coloured by orientation) ─────────────────
-    _draw_graph(ax[5], clean_graph, clean_orientations, sm_orient, 'Clean graph — orientation')
+    draw_graph_panel(ax[5], clean_graph, clean_orientations, sm_orient, background,
+                     'Clean graph — orientation')
 
     fig.colorbar(sm, ax=ax[4], fraction=0.02, pad=0.02, label='Vessel diameter (\u00b5m)')
     fig.colorbar(sm_orient, ax=ax[5], fraction=0.02, pad=0.02, label='Orientation to device axis (\u00b0)')
@@ -1075,26 +949,27 @@ def generate_skeleton_overview_plot(segmentation, analysis_results, title="", sa
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def clean_and_analyse(
-    vasculature_segmentation,
-    voxel_size_um=(2.0, 2.0, 2.0),
-    junction_distance_mode='skeleton',
-    exclusion_mask_xy=None,
-):
+def clean_and_analyse(vasculature_segmentation, voxel_size_um=(2.0, 2.0, 2.0), organoid_mask=None):
     """Run full skeletonisation, graph extraction, pruning, and metric computation.
+
+    We first identify the full graph (including sprouts) and record (floating and attached)
+    sprout density, sprout-sprout and sprout-junction density, as well as geomtery of all sprout edges
+    and the average/spread degree of all junctions.
+    
+    We then build a second view by stripping every sprout node, dropping
+    any junctions that were left isolated, and re-running the mid-node
+    collapse (see ANLYSIS README for diagrams) so a vessel ``A — J — B`` whose only reason for the
+    junction ``J`` was a sprout becomes a single ``A — B`` edge. 
+    This gives us a more biological measure for features such as 
+    branches per volume, total vessel length, branch only junction degree, average branch length...
 
     Args:
         vasculature_segmentation: 3-D binary mask (z, y, x).
         voxel_size_um: Isotropic or anisotropic voxel size in micrometers.
-        junction_distance_mode: 'skeleton' for Dijkstra path-length or 'euclidean'.
-        exclusion_mask_xy: Optional 2-D bool mask (y, x). True pixels are excluded
-            from all analysis (e.g. organoid region). Subtracted from chip volume,
-            zeroed in the segmentation, and excluded from pore detection.
-
-    Returns:
-        dict with keys: global_metrics, global_metrics_df, clean_segmentation,
-        binary_edt, skeleton, graph, area_image, pruned_graph, clean_graph,
-        skeleton_from_graph.
+        organoid_mask: Optional 2-D bool mask (y, x). True pixels are
+            zeroed in the segmentation, subtracted from chip and convex
+            hull volumes, and used to drop graph edges that pass through
+            the organoid.
     """
     voxel_size_um = np.asarray(voxel_size_um, dtype=float)
     voxel_volume_um3 = float(np.prod(voxel_size_um))
@@ -1102,50 +977,29 @@ def clean_and_analyse(
 
     # Determine the device long axis from the image footprint (y=shape[1], x=shape[2]).
     # If x-extent >= y-extent the image is landscape → long axis is x; otherwise y.
-    _h, _w = vasculature_segmentation.shape[1], vasculature_segmentation.shape[2]
-    device_axis = 'x' if _w >= _h else 'y'
+    device_height, device_width = vasculature_segmentation.shape[1], vasculature_segmentation.shape[2]
+    device_axis = 'x' if device_width >= device_height else 'y'
 
     # ---- apply exclusion mask (e.g. organoid region) ----
-    if exclusion_mask_xy is not None:
-        exclusion_mask_xy = np.asarray(exclusion_mask_xy, dtype=bool)
+    if organoid_mask is not None:
+        organoid_mask = np.asarray(organoid_mask, dtype=bool)
         vasculature_segmentation = vasculature_segmentation.copy()
-        vasculature_segmentation[:, exclusion_mask_xy] = 0
+        vasculature_segmentation[:, organoid_mask] = 0
 
     # ---- clean segmentation ----
-    binary_smoothed = cupy_chunk_processing(
-        volume=vasculature_segmentation.astype(np.float32),
-        processing_func=ndi_gpu.gaussian_filter,
-        sigma=3,
-        chunk_size=chunk_size,
-    ) > 0.5
-    clean_segmentation = cupy_chunk_processing(
-        volume=binary_smoothed,
-        processing_func=ndi_gpu.binary_fill_holes,
-        chunk_size=chunk_size,
-    ).astype(np.float32)
-    binary_edt = cupy_chunk_processing(
-        volume=clean_segmentation,
-        processing_func=ndi_gpu.distance_transform_edt,
-        sampling=tuple(voxel_size_um),
-        chunk_size=chunk_size,
-    )
+    binary_smoothed = cupy_chunk_processing(volume=vasculature_segmentation.astype(np.float32),
+        processing_func=ndi_gpu.gaussian_filter, sigma=3, chunk_size=chunk_size) > 0.5
+    clean_segmentation = cupy_chunk_processing(volume=binary_smoothed,
+        processing_func=ndi_gpu.binary_fill_holes, chunk_size=chunk_size).astype(np.float32)
+    binary_edt = cupy_chunk_processing(volume=clean_segmentation, processing_func=ndi_gpu.distance_transform_edt,
+        sampling=tuple(voxel_size_um), chunk_size=chunk_size)
 
     # ---- skeletonise and graph ----
     dask_volume = da.from_array(clean_segmentation.astype(bool), chunks=chunk_size)
-    skeleton = da.overlap.map_overlap(
-        dask_volume,
-        skeletonize_3d,
-        depth=(2, 2, 2),
-        boundary='none',
-        dtype=bool,
+    skeleton = da.overlap.map_overlap(dask_volume, skeletonize_3d, depth=(2, 2, 2), boundary='none', dtype=bool,
     ).compute(scheduler='threads')
     graph = sknw.build_sknw(skeleton)
-    area_image = compute_cross_sectional_areas(
-        vasculature_segmentation,
-        skeleton,
-        binary_edt,
-        voxel_size_um=voxel_size_um,
-    )
+    area_image = compute_cross_sectional_areas(vasculature_segmentation, skeleton, binary_edt, voxel_size_um=voxel_size_um)
 
     for n in list(graph.nodes()):
         graph.nodes[n]['pts'] = graph.nodes[n]['pts'][0]
@@ -1153,67 +1007,42 @@ def clean_and_analyse(
 
     pruned_graph = prune_graph(graph=graph, area_3d=area_image, edt_cutoff=0.20, length_cutoff=25)
     clean_graph = remove_mid_node(pruned_graph)
-    # B3: copy once here; both trimming functions operate inplace on that single copy
-    clean_graph = clean_graph.copy()
-    collect_border_vicinity_edges(clean_graph, vasculature_segmentation.shape, inplace=True)
-    if exclusion_mask_xy is not None:
-        collect_exclusion_zone_edges(clean_graph, exclusion_mask_xy, inplace=True)
-    isolated_nodes = [node for node in clean_graph.nodes() if clean_graph.degree[node] == 0]
-    if isolated_nodes:
-        clean_graph.remove_nodes_from(isolated_nodes)
+    clean_graph = prune_out_of_bounds_edges(clean_graph, vasculature_segmentation.shape, organoid_mask=organoid_mask)
 
     skeleton_from_graph = graph2image(clean_graph, vasculature_segmentation.shape).astype(np.uint8)
     for node in clean_graph.nodes():
         clean_graph.nodes[node]['sprout'] = clean_graph.degree(node) == 1
 
-    # Sprout-collapsed view: drop every sprout (degree-1) node and re-run
-    # mid-node collapse. A junction whose only reason to be degree > 2
-    # was a sprout is dissolved, so a vessel A — J — B with a tip off J
-    # appears as a single A — B edge here. Used as the source for every
-    # ``*_branch_*`` aggregate and for ``branches_per_volume`` /
-    # ``total_number_of_branches``. Junction counts, junction
-    # connectivity, sprout-side stats and densities continue to use
-    # ``clean_graph`` so a sprout-bearing junction still counts as a
-    # junction.
+    # Sprout-collapsed view: remove sprouts and any nodes that existed only as sprout points
     branch_only_graph = build_branch_only_graph(clean_graph)
 
     # ---- metrics ----
     global_metrics = {}
     chip_volume_um3 = float(np.prod(vasculature_segmentation.shape)) * voxel_volume_um3
-    # Subtract excluded region from chip volume
-    if exclusion_mask_xy is not None:
-        excluded_voxels = int(np.count_nonzero(exclusion_mask_xy)) * vasculature_segmentation.shape[0]
+    # Subtract masked organoid region from chip volume
+    if organoid_mask is not None:
+        excluded_voxels = int(np.count_nonzero(organoid_mask)) * vasculature_segmentation.shape[0]
         chip_volume_um3 -= float(excluded_voxels) * voxel_volume_um3
     vessel_volume_um3 = float(np.count_nonzero(clean_segmentation)) * voxel_volume_um3
 
     # ---- convex hull volume of segmented region ----
-    # The convex hull is the geometric envelope of the vessel point cloud.
-    # If an exclusion region (e.g. an organoid) sits inside that envelope,
-    # its volume must be subtracted so it is not counted as available
-    # space in `vessel_volume_fraction = V_vessel / V_hull` or in any
-    # `*_per_chip_volume*` density that divides by `V_hull`.
+    # Remove masked organoid volume if it exists (always a prism)
     seg_pts = np.argwhere(clean_segmentation > 0)
     if len(seg_pts) >= 4:
         try:
             seg_pts_um = seg_pts * voxel_size_um[None, :]
             hull = ConvexHull(seg_pts_um)
             convex_hull_volume_um3 = hull.volume
-
-            if exclusion_mask_xy is not None and np.any(exclusion_mask_xy):
-                # Volume of the (z-extruded) exclusion region that falls
-                # *inside* the convex hull. Prefilter to the hull's bbox so
-                # find_simplex only runs on candidate voxels.
+            if organoid_mask is not None and np.any(organoid_mask):
                 hull_min_um = seg_pts_um[hull.vertices].min(axis=0)
                 hull_max_um = seg_pts_um[hull.vertices].max(axis=0)
                 z_um_full = np.arange(vasculature_segmentation.shape[0]) * voxel_size_um[0]
                 z_in = np.where((z_um_full >= hull_min_um[0]) & (z_um_full <= hull_max_um[0]))[0]
-                ys, xs = np.where(exclusion_mask_xy)
+                ys, xs = np.where(organoid_mask)
                 y_um = ys * voxel_size_um[1]
                 x_um = xs * voxel_size_um[2]
-                xy_in = np.where(
-                    (y_um >= hull_min_um[1]) & (y_um <= hull_max_um[1])
-                    & (x_um >= hull_min_um[2]) & (x_um <= hull_max_um[2])
-                )[0]
+                xy_in = np.where((y_um >= hull_min_um[1]) & (y_um <= hull_max_um[1])
+                    & (x_um >= hull_min_um[2]) & (x_um <= hull_max_um[2]))[0]
                 if z_in.size and xy_in.size:
                     hull_delaunay = Delaunay(seg_pts_um[hull.vertices])
                     z_rep = np.repeat(z_in, xy_in.size)
@@ -1223,9 +1052,7 @@ def clean_and_analyse(
                         * voxel_size_um[None, :]
                     inside = hull_delaunay.find_simplex(excl_coords_um) >= 0
                     excluded_inside_hull_um3 = float(np.count_nonzero(inside)) * voxel_volume_um3
-                    convex_hull_volume_um3 = max(
-                        convex_hull_volume_um3 - excluded_inside_hull_um3, 0.0,
-                    )
+                    convex_hull_volume_um3 = max(convex_hull_volume_um3 - excluded_inside_hull_um3, 0.0)
         except Exception:
             convex_hull_volume_um3 = chip_volume_um3
     else:
@@ -1239,23 +1066,13 @@ def clean_and_analyse(
         kinds = np.asarray(list(edge_kind_lookup.values()))
         attached_sprouts_count = int(np.count_nonzero(kinds == 'attached_sprout'))
         floating_sprouts_count = int(np.count_nonzero(kinds == 'floating_sprout'))
-        branchpoints_count = sum(
-            1 for n in clean_graph.nodes() if not clean_graph.nodes[n]['sprout']
-        )
-        # L_total and the branch count come from the sprout-collapsed
-        # graph so an A — J — B vessel with a sprout off J is a single
-        # branch, not two. Polyline lengths are preserved by the
-        # ``remove_mid_node`` merge, so summing here gives the same total
-        # as summing the non-sprout edges of clean_graph would.
+        branchpoints_count = sum(1 for n in clean_graph.nodes() if not clean_graph.nodes[n]['sprout'])
         if branch_only_graph.number_of_edges() > 0:
             branch_only_lengths = np.asarray([
                 float(np.linalg.norm(
                     np.diff(branch_only_graph[u][v]['pts'].astype(float)
-                            * voxel_size_um[None, :], axis=0),
-                    axis=1,
-                ).sum())
-                for u, v in branch_only_graph.edges()
-            ], dtype=float)
+                            * voxel_size_um[None, :], axis=0), axis=1).sum())
+                for u, v in branch_only_graph.edges()], dtype=float)
             total_vessel_length_um = float(branch_only_lengths.sum())
             branches_count = int(branch_only_graph.number_of_edges())
         else:
@@ -1275,51 +1092,23 @@ def clean_and_analyse(
     global_metrics['vessel_volume_fraction'] = safe_divide(vessel_volume_um3, convex_hull_volume_um3)
     global_metrics['total_vessel_length'] = float(total_vessel_length_um)
     # Length-density: branch-only length per hull volume (sprouts excluded).
-    global_metrics['branch_length_per_volume'] = safe_divide(
-        total_vessel_length_um, convex_hull_volume_um3,
-    )
-    global_metrics['attached_sprouts_per_vessel_length'] = safe_divide(
-        attached_sprouts_count, total_vessel_length_um,
-    )
+    global_metrics['branch_length_per_volume'] = safe_divide(total_vessel_length_um, convex_hull_volume_um3)
+    global_metrics['attached_sprouts_per_vessel_length'] = safe_divide(attached_sprouts_count, total_vessel_length_um)
     global_metrics['junctions_per_vessel_length'] = safe_divide(branchpoints_count, total_vessel_length_um)
     global_metrics['skeleton_fractal_dimension'] = fd
     global_metrics['skeleton_lacunarity'] = lacunarity
-    # Distance-headline placeholders; populated by
-    # ``summarize_network_headline_metrics`` below. Per-edge aggregates
-    # (orientation / length / cs_area) are owned by
-    # ``compute_all_morphological_params``.
-    global_metrics['median_junction_skeleton_dist_nearest_junction'] = np.nan
-    global_metrics['spread_junction_skeleton_dist_nearest_junction'] = np.nan
-    global_metrics['median_sprout_skeleton_dist_nearest_endpoint'] = np.nan
-    global_metrics['spread_sprout_skeleton_dist_nearest_endpoint'] = np.nan
 
-    branch_metrics_df = compute_branch_metrics_df(
-        clean_graph,
-        area_image,
-        voxel_size_um=voxel_size_um,
-        device_axis=device_axis,
-    )
-    # Per-edge metrics on the sprout-collapsed graph: each row here
-    # corresponds to a real branch in which any sprout-bearing
-    # intermediate junctions have been merged. Used as the source of the
-    # ``*_branch_*`` aggregates downstream.
-    branch_only_metrics_df = compute_branch_metrics_df(
-        branch_only_graph,
-        area_image,
-        voxel_size_um=voxel_size_um,
-        device_axis=device_axis,
-    )
+    for agg in ('median', 'spread'):
+        for role, target in (('junction', 'junction'), ('sprout', 'endpoint')):
+            for mode in ('skeleton', 'euclidean'):
+                global_metrics[f'{agg}_{role}_{mode}_dist_nearest_{target}'] = np.nan
+
+    branch_metrics_df = compute_branch_metrics_df(clean_graph, area_image, voxel_size_um=voxel_size_um, device_axis=device_axis)
+    branch_only_metrics_df = compute_branch_metrics_df(branch_only_graph, area_image, voxel_size_um=voxel_size_um,
+        device_axis=device_axis)
 
     if clean_graph.number_of_nodes() > 0 and clean_graph.number_of_edges() > 0:
-        global_metrics.update(
-            summarize_network_headline_metrics(
-                clean_graph,
-                area_image,
-                voxel_size_um=voxel_size_um,
-                distance_mode=junction_distance_mode,
-                device_axis=device_axis,
-            )
-        )
+        global_metrics.update(summarize_network_headline_metrics(clean_graph, voxel_size_um=voxel_size_um))
 
     global_metrics['average_vessel_volume'] = (
         float(np.nanmean(branch_metrics_df['branch_volume'].to_numpy(dtype=float)))
@@ -1328,37 +1117,14 @@ def clean_and_analyse(
     )
 
     # ---- extra density metrics (per hull volume) ----
-    global_metrics['attached_sprouts_per_volume'] = safe_divide(
-        attached_sprouts_count, convex_hull_volume_um3,
-    )
+    global_metrics['attached_sprouts_per_volume'] = safe_divide(attached_sprouts_count, convex_hull_volume_um3)
     global_metrics['junctions_per_volume'] = safe_divide(branchpoints_count, convex_hull_volume_um3)
     global_metrics['branches_per_volume'] = safe_divide(branches_count, convex_hull_volume_um3)
-    global_metrics['floating_sprouts_per_volume'] = safe_divide(
-        floating_sprouts_count, convex_hull_volume_um3,
-    )
-
-    # ---- raw counts (for comprehensive output) ----
-    global_metrics['n_attached_sprouts'] = int(attached_sprouts_count)
-    global_metrics['n_floating_sprouts'] = int(floating_sprouts_count)
-    global_metrics['total_number_of_branches'] = int(branches_count)
-    global_metrics['total_number_of_junctions'] = int(branchpoints_count)
-    global_metrics['total_number_of_edges'] = int(clean_graph.number_of_edges())
-    global_metrics['total_number_of_nodes'] = int(clean_graph.number_of_nodes())
+    global_metrics['floating_sprouts_per_volume'] = safe_divide(floating_sprouts_count, convex_hull_volume_um3)
 
     # ---- junction metrics ----
-    junction_metrics_df = compute_junction_metrics_df(
-        clean_graph,
-        voxel_size_um=voxel_size_um,
-        distance_threshold_um=500.0,
-    )
-    # Sprout-free junction view: source for the ``*_branch_only_junction_*``
-    # aggregator family (e.g. branch-only junction degree, which excludes
-    # sprout-edges from the degree count).
-    branch_only_junction_metrics_df = compute_junction_metrics_df(
-        branch_only_graph,
-        voxel_size_um=voxel_size_um,
-        distance_threshold_um=500.0,
-    )
+    junction_metrics_df = compute_junction_metrics_df(clean_graph, voxel_size_um=voxel_size_um, distance_threshold_um=500.0)
+    branch_only_junction_metrics_df = compute_junction_metrics_df(branch_only_graph, voxel_size_um=voxel_size_um, distance_threshold_um=500.0)
 
     # ---- comprehensive all-params DataFrame ----
     all_morphological_params_df = compute_all_morphological_params(

@@ -68,6 +68,7 @@ classification verbatim in its `edge_kind` column.
 
 Branch-side geometry features (`median_branch_length`, `median_branch_median_cs_area`, `median_branch_tortuosity`, …) are computed on the sprout-collapsed graph so a vessel `A — J — B` carrying a sprout off `J` contributes one branch, not two. The full audit file additionally exposes attached-sprout-only and floating-sprout-only aggregates for every per-edge metric (length, calibre, tortuosity, orientation, …), but those are excluded from the curated panel because their absolute values are dominated by the skeletonisation algorithm.
 
+  <img src="README_images/pruning.png" width="75%" />
 
 Symbols used throughout:
 
@@ -373,11 +374,10 @@ could be one of two options depending on the metric chosen.
 
   <img src="README_images/distance_metrics.png" width="75%" />
 
-The pipeline currently sets `junction_distance_mode = 'skeleton'`:
+The pipeline computes **both** modes in every run:
 
-- **`skeleton`** (default): nearest-neighbour distances are graph
-  shortest-path lengths along vessel centerlines — the biologically
-  traversable route.
+- **`skeleton`**: nearest-neighbour distances are graph shortest-path
+  lengths along vessel centerlines — the biologically traversable route.
 - **`euclidean`**: nearest-neighbour distances are straight-line
   distances in physical space.
 

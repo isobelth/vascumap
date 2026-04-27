@@ -96,8 +96,7 @@ The U-Net operates in 2D, but is run on all three orthogonal cross-sections (axi
 After `sknw` builds the initial graph from the skeleton:
 1. **`prune_graph`**: Removes terminal branches where the endpoint-end of the branch has a small EDT relative to the junction end (i.e., branches that taper off into noise). A `length_cutoff` also removes very short stubs.
 2. **`remove_mid_node`**: Merges degree-2 nodes (passthrough nodes) to produce a clean graph where every node is either a junction (degree ≥ 3) or an endpoint (degree = 1).
-3. **`collect_border_vicinity_edges`**: Removes edges that pass within `vicinity_xy=50` pixels of the XY border (where the device wall may create artefacts).
-4. **`collect_exclusion_zone_edges`** (if organoid masking enabled): Removes edges passing through the organoid/central region.
+3. **`prune_out_of_bounds_edges`**: In a single pass, removes edges that pass within `vicinity_xy=50` pixels of the XY border (device-wall artefacts) and, if an organoid mask is supplied, edges passing through that exclusion zone. Isolated nodes are dropped afterwards.
 
 ---
 
@@ -191,7 +190,6 @@ Sets `self._z_start_final`, `self._z_stop_final`, `self._pixels_to_remove`.
 ```python
 vm.skeletonisation_and_analysis(
     voxel_size_um=(2.0, 2.0, 2.0),
-    junction_distance_mode='skeleton'  # 'skeleton' or 'euclidean'
 )
 ```
 
@@ -452,8 +450,7 @@ Main entry point. Runs the complete skeletonisation and metric computation pipel
 results = clean_and_analyse(
     vasculature_segmentation: np.ndarray,   # 3D binary mask (Z, Y, X)
     voxel_size_um=(2.0, 2.0, 2.0),
-    junction_distance_mode='skeleton',       # 'skeleton' or 'euclidean'
-    exclusion_mask_xy=None,                  # 2D bool mask for organoid region
+    organoid_mask=None,                  # 2D bool mask for organoid region
 )
 ```
 
@@ -497,13 +494,9 @@ This eliminates thin noise stubs while keeping meaningful sprouts.
 
 Iteratively removes degree-2 nodes by merging their two incident edges into one. Edge point coordinates are concatenated in the correct orientation (using pairwise distance checks).
 
-### `collect_border_vicinity_edges(graph, image_shape, vicinity_xy=50)`
+### `prune_out_of_bounds_edges(graph, image_shape, organoid_mask=None, vicinity_xy=50, inplace=False)`
 
-Removes edges where any point lies within `vicinity_xy` pixels of the XY image boundary. Isolated nodes are removed afterwards.
-
-### `collect_exclusion_zone_edges(graph, exclusion_mask_xy)`
-
-Removes edges where any point `(y, x)` falls in the exclusion mask. Used to eliminate vessels from the organoid region.
+Single-pass edge pruner: removes any edge with a point within `vicinity_xy` pixels of the XY border, or (if `organoid_mask` is provided) any point falling inside that mask. Isolated nodes are removed afterwards. Pass `inplace=True` to mutate the input graph and avoid the copy.
 
 ## 5.3 Metric Functions
 
@@ -516,13 +509,18 @@ At each skeleton voxel `(z, y, x)`:
 
 Returns a 3D array with areas only at skeleton locations.
 
-### `summarize_network_headline_metrics(graph, area_image, ...)`
+### `summarize_network_headline_metrics(graph, voxel_size_um=(2.0, 2.0, 2.0))`
 
-Computes per-edge and per-node statistics:
-- Tortuosity = `path_length / straight_line_distance` (clipped to [0, 5])
-- Median cross-sectional area per edge
-- Junction-to-junction distances (Dijkstra path lengths over the graph, or Euclidean)
-- Endpoint-to-endpoint distances
+Computes nearest-neighbour distance summaries between same-type nodes
+(junction↔junction, sprout↔sprout) using **both** distance modes in a
+single call:
+
+- `skeleton` — Dijkstra path length along the vessel graph, weighted by
+  polyline µm length
+- `euclidean` — straight-line µm distance
+
+Returns a dict with eight keys of the form
+`{median,spread}_{junction,sprout}_{skeleton,euclidean}_dist_nearest_{junction,endpoint}`.
 
 ### `compute_internal_pore_headline_metrics(mask, ...)`
 
