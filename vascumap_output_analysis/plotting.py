@@ -33,13 +33,15 @@ def create_n_valued_palette(base_colour, n=5):
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def combine_outputs(root_dir):
+def combine_outputs(root_dir, output_dir=None):
     """Recursively find analysis/branch CSVs under root_dir and concatenate them.
 
     Returns (combined_analysis_metrics, combined_branch_metrics).
-    Also saves combined CSVs back into root_dir.
+    Combined CSVs are saved into ``output_dir`` if given, else into ``root_dir``.
     """
     root_dir = Path(root_dir)
+    save_dir = Path(output_dir) if output_dir is not None else root_dir
+    save_dir.mkdir(parents=True, exist_ok=True)
     csv_files = list(root_dir.rglob("*.csv"))
     if not csv_files:
         print("No CSV files found.")
@@ -63,14 +65,14 @@ def combine_outputs(root_dir):
 
     if combined_analysis_metrics:
         combined_analysis_metrics = pd.concat(combined_analysis_metrics, ignore_index=True, sort=False)
-        combined_analysis_metrics.to_csv(root_dir / "combined_analysis_metrics.csv", index=False)
+        combined_analysis_metrics.to_csv(save_dir / "combined_analysis_metrics.csv", index=False)
     else:
         print("No analysis metric files could be read successfully.")
         combined_analysis_metrics = None
 
     if combined_branch_metrics:
         combined_branch_metrics = pd.concat(combined_branch_metrics, ignore_index=True, sort=False)
-        combined_branch_metrics.to_csv(root_dir / "combined_branch_metrics.csv", index=False)
+        combined_branch_metrics.to_csv(save_dir / "combined_branch_metrics.csv", index=False)
     else:
         print("No branch metric files could be read successfully.")
         combined_branch_metrics = None
@@ -92,7 +94,7 @@ def plot_experiment_comparisons(df, y_metrics, xorder, plot_title, save_dir,
         sns.stripplot(data=df, x="experiment", y=metric, ax=ax[i], zorder=100,
                       hue="experiment", palette=condition_colors, order=xorder, legend=False)
         sns.boxplot(data=df, x="experiment", y=metric, ax=ax[i],
-                    fill=False, color="#000000", order=xorder)
+                    fill=False, color="#000000", order=xorder, showfliers=False)
     plt.tight_layout()
     out_path = Path(save_dir) / f"{plot_title}.{save_type}"
     plt.savefig(out_path)
@@ -234,12 +236,18 @@ def pca_plots(combined_analysis_metrics, condition_colors, save_dir=None, save_t
     sig_mask_all = p_values < 0.05
     sig_features = feat_imp[sig_mask_all[feat_imp.index.map(lambda f: list(X.columns).index(f))]]
 
+    # Per-feature p-values as a Series for easy sorting / lookup
+    p_series = pd.Series(p_values, index=X.columns)
+    # Significant features ranked by significance (smallest p first)
+    sig_features_by_p = p_series[sig_mask_all].sort_values(ascending=True)
+
     # --- Layout ---
-    fig = plt.figure(figsize=(20, 6), constrained_layout=True)
-    gs = GridSpec(1, 3, figure=fig, width_ratios=[1, 1, 1.4])
+    fig = plt.figure(figsize=(26, 6), constrained_layout=True)
+    gs = GridSpec(1, 4, figure=fig, width_ratios=[1, 1, 1.4, 1.4])
     ax0 = fig.add_subplot(gs[0])
     ax1 = fig.add_subplot(gs[1])
     ax2 = fig.add_subplot(gs[2])
+    ax3 = fig.add_subplot(gs[3])
 
     # --- 1. PCA scatter ---
     for name in conditions:
@@ -286,29 +294,49 @@ def pca_plots(combined_analysis_metrics, condition_colors, save_dir=None, save_t
     ax1.legend(fontsize=8)
 
     # --- 3. Top feature importances bar chart ---
-    top = feat_imp.head(10)
+    # Rank by combined discriminative power: |PCA loading| * -log10(p)
+    # (matches plot_all_feature_discrimination so the two plots agree).
+    discrim_score = pd.Series(np.abs(importance) * neg_log_p, index=X.columns).sort_values(ascending=False)
+    top = discrim_score.head(10)
     if is_binary:
-        colors = [condition_colors[pos_class] if v > 0 else condition_colors[neg_class] for v in top]
-        ax2.set_xlabel(f"Loading importance (+ → {pos_class}, − → {neg_class})")
+        signs = feat_imp.reindex(top.index)
+        colors = [condition_colors[pos_class] if signs[f] > 0 else condition_colors[neg_class] for f in top.index]
+        ax2.set_xlabel(f"|PCA loading| × $-\\log_{{10}}$(p)  (colour: higher in {pos_class} or {neg_class})")
     else:
         colors = [condition_colors.get(dominant_class[feat], "grey") for feat in top.index]
-        ax2.set_xlabel("Loading importance (coloured by dominant class)")
+        ax2.set_xlabel("|PCA loading| × $-\\log_{10}$(p)  (colour: dominant class)")
     ax2.barh(top.index[::-1], top.values[::-1], color=colors[::-1])
-    ax2.set_title("Top 10 discriminating features")
+    ax2.set_title("Top 10 discriminating features\n(|PCA loading| × $-\\log_{10}$(p))")
     ax2.axvline(0, color="grey", linewidth=0.8)
     ax2.tick_params(axis="y", labelsize=9)
+
+    # --- 4. Top features by significance ---
+    top_sig = p_series.sort_values(ascending=True).head(10)
+    top_sig_neg_log_p = -np.log10(np.clip(top_sig.values, 1e-300, None))
+    if is_binary:
+        sig_colors = [condition_colors[pos_class] if feat_imp.get(f, 0) > 0 else condition_colors[neg_class]
+                      for f in top_sig.index]
+    else:
+        sig_colors = [condition_colors.get(dominant_class[f], "grey") for f in top_sig.index]
+    ax3.barh(top_sig.index[::-1], top_sig_neg_log_p[::-1], color=sig_colors[::-1])
+    ax3.axvline(sig_threshold, color="grey", linestyle="--", linewidth=0.8, label="p = 0.05")
+    ax3.set_xlabel("$-\\log_{10}$(p-value)")
+    ax3.set_title("Top 10 most significant features")
+    ax3.tick_params(axis="y", labelsize=9)
+    ax3.legend(fontsize=8, loc="lower right")
 
     if save_dir is not None:
         fig.savefig(Path(save_dir) / f"pca_plots.{save_type}", dpi=150)
     plt.show()
 
-    top5 = feat_imp.head(5).index.to_list()
-    if len(sig_features) == 0:
-        print("No significant features (p < 0.05). Returning top 5 most discriminating features instead.")
-        return top5, top5
+    top5 = discrim_score.head(5).index.to_list()
+    if len(sig_features_by_p) == 0:
+        print("No significant features (p < 0.05). Returning top 5 most significant features (lowest p-values) instead.")
+        top5_sig = p_series.sort_values(ascending=True).head(5).index.to_list()
+        return top5_sig, top5
 
-    print(f"Significant features: {len(sig_features)} / {len(X.columns)}")
-    return sig_features.index.to_list(), top5
+    print(f"Significant features: {len(sig_features_by_p)} / {len(X.columns)} (sorted by p-value)")
+    return sig_features_by_p.index.to_list(), top5
 
 
 def plot_all_feature_discrimination(combined_analysis_metrics, condition_colors,
@@ -393,3 +421,93 @@ def plot_all_feature_discrimination(combined_analysis_metrics, condition_colors,
     plt.show()
 
     return discrim.iloc[::-1]
+
+
+def plot_all_feature_significance(combined_analysis_metrics, condition_colors,
+                                  save_dir=None, save_type="png"):
+    """Single horizontal bar chart showing every feature ranked by significance only.
+
+    Significance = -log10(p-value) from Mann-Whitney U (binary) or
+    Kruskal-Wallis (multiclass). Bars are coloured the same way as
+    plot_all_feature_discrimination (binary: by sign of the PCA loading;
+    multiclass: by the class with the largest absolute deviation from the
+    overall mean). A dashed line marks p = 0.05.
+    """
+    X = combined_analysis_metrics.drop(
+        ["experiment", "image_name", "source_file", "image_index",
+         "chip_volume_um3", "convex_hull_volume_um3", "vessel_volume_um3", "source_folder"],
+        axis=1, errors="ignore",
+    )
+    y = combined_analysis_metrics["experiment"]
+
+    X = X.dropna(axis=1, how="all")
+    valid = X.notna().all(axis=1)
+    X = X[valid]
+    y = y[valid]
+
+    conditions = [c for c in condition_colors if c in y.unique()]
+    is_binary = len(conditions) == 2
+
+    # PCA only used for colouring (sign of loading / dominant class)
+    X_scaled = StandardScaler().fit_transform(X)
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X_scaled)
+    loadings = pca.components_
+    ev = pca.explained_variance_ratio_
+
+    if is_binary:
+        importance_raw = loadings[0] * ev[0] + loadings[1] * ev[1]
+        mean_pc1 = {c: X_pca[y.values == c, 0].mean() for c in conditions}
+        pos_class = max(mean_pc1, key=mean_pc1.get)
+        neg_class = min(mean_pc1, key=mean_pc1.get)
+        p_values = np.array([
+            mannwhitneyu(X.loc[y == conditions[0], c],
+                         X.loc[y == conditions[1], c],
+                         alternative="two-sided")[1]
+            for c in X.columns
+        ])
+    else:
+        group_means = pd.DataFrame({c: X.loc[y == c].mean() for c in conditions})
+        deviations = group_means.subtract(X.mean(), axis=0).abs()
+        dominant_class = deviations.idxmax(axis=1)
+        p_values = np.array([
+            kruskal(*[X.loc[y == c, col].values for c in conditions])[1]
+            for col in X.columns
+        ])
+
+    # Sort ascending in p-value (most significant first); for the bar chart we
+    # plot -log10(p) so larger bars = more significant. The smallest p sits
+    # at the top of the chart.
+    p_series = pd.Series(p_values, index=X.columns).sort_values(ascending=False)
+    neg_log_p_series = -np.log10(np.clip(p_series.values, 1e-300, None))
+    sig_threshold = -np.log10(0.05)
+
+    if is_binary:
+        signs = pd.Series(importance_raw, index=X.columns)
+        colors = [condition_colors[pos_class] if signs[f] > 0 else condition_colors[neg_class]
+                  for f in p_series.index]
+    else:
+        colors = [condition_colors.get(dominant_class[f], "grey") for f in p_series.index]
+
+    n = len(p_series)
+    fig, ax = plt.subplots(figsize=(10, max(4, 0.22 * n)), constrained_layout=True)
+    ax.barh(p_series.index, neg_log_p_series, color=colors)
+    ax.axvline(sig_threshold, color="grey", linestyle="--", linewidth=0.8, label="p = 0.05")
+    ax.set_xlabel("$-\\log_{10}$(p-value)")
+    test_name = "Mann-Whitney U" if is_binary else "Kruskal-Wallis"
+    ax.set_title(f"Every feature ranked by significance\n({test_name})")
+    ax.tick_params(axis="y", labelsize=8)
+
+    # Legend: class colours + p = 0.05
+    handles = [plt.Rectangle((0, 0), 1, 1, color=condition_colors[c]) for c in conditions]
+    labels = [c.capitalize() for c in conditions]
+    handles.append(plt.Line2D([0], [0], color="grey", linestyle="--", linewidth=0.8))
+    labels.append("p = 0.05")
+    ax.legend(handles, labels, fontsize=8, loc="lower right")
+
+    if save_dir is not None:
+        fig.savefig(Path(save_dir) / f"all_feature_significance.{save_type}", dpi=150)
+    plt.show()
+
+    # Return with smallest p first (most significant at the top of the Series)
+    return p_series.iloc[::-1]

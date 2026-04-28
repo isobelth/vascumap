@@ -1,198 +1,209 @@
 # VascuMap
 
-**3D Vascular Network Analysis Pipeline for Microfluidic Chip Imaging**
+**3D vascular network analysis pipeline for microfluidic chip imaging**
 
-VascuMap is a Python pipeline for segmenting and analysing 3D vascular networks imaged inside microfluidic chips. It combines a napari-based interactive GUI for device segmentation with deep learning inference (3D Pix2Pix image translation + 2.5D U-Net segmentation) and graph-based network analysis.
+VascuMap takes a brightfield microscopy stack of a vascularised microfluidic chip and returns a clean 3-D vessel mask, a topological graph of the vessel network, and a curated set of morphometric metrics suitable for PCA / clustering / cohort comparison. It combines a napari-based interactive curation GUI with deep-learning inference (3-D Pix2Pix image translation + 2.5-D U-Net segmentation) and graph-based skeleton analysis.
 
----
-
-## Overview
-
-The pipeline processes `.lif`, `.tif`, or `.tiff` microscopy stacks through five main stages:
-
-1. **Device Segmentation** – Locates and crops the microfluidic device region using a napari GUI or a fully automatic mode.
-2. **Preprocess** – Selects a focus-informed z-range from per-plane vote counts and resamples the stack to a standard 5×2×2 µm voxel size.
-3. **Model Inference** – Runs 3D Pix2Pix image translation (brightfield → fluorescence-like) and 2.5D U-Net segmentation to produce a binary vessel mask at 2 µm isotropic resolution.
-4. **Postprocess** – Trims the volume to strongly-focused z-planes and crops XY edges by the device width.
-5. **Skeletonisation and Analysis** – Cleans the mask, extracts a vessel skeleton, builds a NetworkX graph, and computes morphometric and topological metrics.
+The package is intended to be run from the repository root with `python -m vascumap`, which opens a launcher GUI for selecting folders, model checkpoints, and run mode.
 
 ---
 
-## Project Structure
+## 1. Quick start
 
-```
-bel_vascumap/
-├── vascumap.py                  # VascuMap class + CLI entry point
-├── device_segmentation.py       # DeviceSegmentationApp (napari GUI + auto mode)
-├── models.py                    # Pix2Pix (Generator, Discriminator), segmentation loaders
-├── skeletonisation.py           # Graph construction, pruning, and metric computation
-├── utils.py                     # Array utilities (scale, resize_dask, cupy_chunk_processing)
-└── README.md
-```
-
----
-
-## Installation
-
-### Prerequisites
-- Python 3.10+
-- CUDA-capable GPU (required; CuPy and GPU inference are mandatory)
-- CUDA Toolkit 11.x or 12.x
-
-### Setup
+From the repository root:
 
 ```bash
-conda env create -f env_backup_base_20260309_172159.yml
-conda activate vascumap
+python -m vascumap
 ```
+
+This opens the **launcher GUI**. Fill in:
+
+| Field | Meaning |
+|-------|---------|
+| **Source Folder** | Folder containing `.lif`, `.tif`, or `.tiff` files to analyse |
+| **Output Folder** | Where per-image result folders will be written |
+| **Skip Folder** *(optional)* | Any image whose expected output folder name already exists here will be skipped (useful when resuming partial runs) |
+| **Device Width (µm)** | Width of the microfluidic device — used both for outer-geometry padding during segmentation and for trimming XY edges of the analysed volume |
+| **Brightfield Channel** | Channel index for multi-channel TIFFs |
+| **Organoid masking** | `No organoid masking` / `Dark organoid` / `Light organoid` / `Infer from name`. Selects whether to detect and exclude a central organoid region from segmentation and analysis. |
+| **Require 'merged' in name** | If on, only images whose name contains `merged` are processed (typical for LIF series) |
+| **Save All Intermediates** | If on, also saves cropped stacks, vessel masks, skeletons, the cleaned graph, and the organoid mask |
+| **Pix2Pix Checkpoint** | Path to a `.ckpt` Pix2Pix generator |
+| **U-Net Checkpoint** | Path to a `.pth` 2-D U-Net checkpoint |
+
+Then click one of:
+
+- **Use GUI (Curation)** — opens napari, lets you review/edit the device ROI and organoid mask for every image, then runs the full pipeline unattended on the curated set.
+- **Run Automatically** — skips curation; uses the automatic device segmentation for every image.
+
+Progress is printed to the terminal. Failures on individual images are logged at the end of the batch rather than aborting the run.
 
 ---
 
-## Usage
+## 2. Pipeline overview
 
-### GUI Mode (interactive, single image)
+For every image, the pipeline runs five stages:
 
-```python
-from vascumap import VascuMap
-
-vm = VascuMap()          # Opens napari – segment device, then close the viewer
-vm.pipeline(output_dir="outputs/")
+```
+.lif / .tif / .tiff
+  │
+  ▼  Stage 1: Device segmentation (device_segmentation.py)
+        - Locate microfluidic device ROI
+        - Crop XY to the device + outer margin
+        - Compute per-z-slice "focus vote" counts
+        - (optional) detect and mask the central organoid region
+  │
+  ▼  Stage 2: Preprocess (core.py → VascuMap.preprocess)
+        - Pick the longest contiguous focused z-slab from the votes
+        - Resample to 5 × 2 × 2 µm voxels (Z × Y × X)
+  │
+  ▼  Stage 3: Model inference (core.py → VascuMap.model_inference)
+        - 3-D Pix2Pix: brightfield → pseudo-fluorescence
+        - Resample to 2 µm isotropic
+        - 2.5-D U-Net inference (axial + coronal + sagittal, averaged)
+        - Hysteresis threshold → binary vessel mask
+  │
+  ▼  Stage 4: Postprocess (core.py → VascuMap.postprocess)
+        - Trim to z-planes with strong focus votes (> 2)
+        - Crop XY edges by `device_width_um` pixels
+  │
+  ▼  Stage 5: Skeletonisation & analysis (skeletonisation.py)
+        - GPU smoothing + 3-D hole filling + EDT
+        - 3-D skeletonisation → sknw graph
+        - Prune sprouts/stubs, merge degree-2 nodes, trim border + organoid edges
+        - Per-branch and per-junction metrics
+        - Curated headline metrics for downstream PCA / clustering
 ```
 
-Or via the command line:
+All downstream analysis (graph, metrics, fractal dimension, cross-sectional areas) is performed on the 2 µm isotropic representation.
 
-```bash
-python vascumap.py --output-dir outputs/
-```
+### 2.1 Z-vote system
 
-On startup, a napari window opens with a control panel on the right:
-1. **Load images** – Browse to a `.lif`, `.tif`, or folder.
-2. **Segment + View** – Detect the device boundary; optionally tick *Mask central region* to exclude an organoid or chip centre.
-3. **Device width (um)** – Set the device exclusion margin.
-4. **Create cropped aligned** – Confirm the crop and store the result.
+`DeviceSegmentationApp` records, for each z-plane, how many sampled patches voted that plane as the most in-focus. `preprocess` takes the longest contiguous run of planes with ≥ 1 vote and expands downward then upward until it covers at least `min_span_um` (default 160 µm). `postprocess` then trims again to the longest run of *strong* votes (> 2), which removes barely-focused fringe planes from the analysed volume.
 
-Close the napari viewer to proceed with the rest of the pipeline.
+### 2.2 2.5-D segmentation
 
-### No-GUI Batch Mode
+The U-Net is 2-D, but is applied along all three orthogonal cross-sections (axial / coronal / sagittal) and the three probability volumes are averaged. This gives much better 3-D consistency than axial-only inference at a fraction of the memory cost of a full 3-D model.
 
-```bash
-python vascumap.py --no-gui \
-    --image-dir /path/to/microscopy/files \
-    --output-dir /path/to/outputs \
-    [--save-all-interim]
-```
+### 2.3 Graph cleaning
 
-All `.lif`, `.tif`, and `.tiff` files in `--image-dir` are processed automatically. Each LIF sub-image is processed individually. Results are saved in per-image sub-folders under `--output-dir`.
+After `sknw.build_sknw` produces a raw graph from the skeleton:
+
+1. **`prune_graph`** removes terminal branches whose endpoint EDT is small relative to the junction-side EDT (i.e. tapering noise stubs) and also removes very short stubs (`length_cutoff` voxels).
+2. **`remove_mid_node`** merges degree-2 nodes so every node in the cleaned graph is either a junction (deg ≥ 3) or an endpoint (deg = 1).
+3. **`prune_out_of_bounds_edges`** drops edges that pass within `vicinity_xy = 50` pixels of the XY border (device-wall artefacts) and, if an organoid mask was supplied, edges that pass through it.
+4. A separate **branch-only graph** (sprouts removed) is also built so that branch-statistics aren't biased by short detached/attached sprouts.
 
 ---
 
-## Output Files
+## 3. Repository layout
 
-For each processed image named `{name}`:
+```
+vascumap/
+├── __main__.py             Launcher entry point — `python -m vascumap`
+├── launcher_gui.py         Initial settings GUI (folders, models, organoid mode)
+├── pipeline.py             discover_jobs / filter_jobs / run_batch / run_batch_from_curation
+├── core.py                 VascuMap class — preprocess → inference → postprocess → analysis → save
+├── device_segmentation.py  DeviceSegmentationApp — napari ROI detection + cropping
+├── gui_region_detection.py CurationApp — multi-image curation viewer
+├── models.py               Pix2Pix (3-D GAN), 2.5-D U-Net loader, ortho prediction, post-processing
+├── skeletonisation.py      clean_and_analyse + all metric / graph / curation helpers
+├── utils.py                scale, resize_dask, cupy_chunk_processing
+├── README.md               (this file)
+├── DOCUMENTATION.md        Full technical reference
+└── Analysis_README.md      Plain-language description of the analysis metrics
+```
+
+The `vascumap_output_analysis/` folder at the repository root contains exploratory notebooks (`plotting_outputs_*.ipynb`) and shared plotting helpers in `plotting.py`.
+
+---
+
+## 4. Output files
+
+For each image named `{name}`, a sub-folder `{output_dir}/{name}/` is created containing:
+
+### Always written
 
 | File | Description |
 |------|-------------|
-| `{name}_overlay_geometry_0.tif` | 2D overlay showing detected device ROI boundaries |
-| `{name}_cropped_stack_aligned.npy` | Brightfield stack at 2 µm isotropic resolution |
-| `{name}_vessel_translation_aligned.npy` | Pix2Pix pseudo-fluorescence volume |
-| `{name}_clean_segmentation.npy` | Cleaned binary vessel mask |
-| `{name}_skeleton.npy` | 1-voxel-wide skeleton derived from the cleaned graph |
-| `{name}_analysis_metrics.csv` | Global morphometric metrics (one row per image) |
-| `{name}_organoid_mask.npy` | XY exclusion mask (only if *Mask central region* was used) |
+| `{name}_overlay_geometry_0.tif` | RGB overlay of the brightfield mean projection with detected ROI: inner boundary in red, outer (device-width-padded) boundary in yellow, organoid region (if any) in cyan. |
+| `{name}_analysis_metrics.csv` | One-row curated metric panel (see [§5](#5-output-metrics)). |
+| `{name}_all_morphological_params.csv` | One-row dump of *every* metric computed (densities, junction stats, branch stats, percentiles, etc.). Use this if a metric you need is missing from the curated panel. |
+| `{name}_branch_metrics.csv` | One row per graph edge (length, tortuosity, median cross-sectional area, orientation, etc.) — useful for per-branch distributions. |
 
-With `--save-all-interim` (or `save_all_interim=True`):
+### With **Save All Intermediates** turned on
 
 | File | Description |
 |------|-------------|
-| `{name}_holes.npy` | Binary internal pore map |
-| `{name}_hole_labels_per_slice.npy` | Per-slice labelled pore regions |
-| `{name}_hole_distance_per_slice_um.npy` | Per-slice pore distance transform (µm) |
-| `{name}_full_graph_skeleton.npy` | Skeleton before graph cleaning/pruning |
-| `{name}_vessel_mask.npy` | Raw binary vessel mask (before cleaning) |
-| `{name}_graph_nodes.npz` | Node coordinates + sprout flag |
-| `{name}_clean_graph.pkl` | Serialised NetworkX vascular graph |
+| `{name}_cropped_stack_aligned.npy` | Brightfield stack at 2 µm isotropic, after the same z- and XY-trim that the analysed volume received. |
+| `{name}_vessel_translation_aligned.npy` | Pix2Pix pseudo-fluorescence volume (2 µm iso). |
+| `{name}_vessel_mask.npy` | Raw binary vessel mask before smoothing/hole-filling. |
+| `{name}_clean_segmentation.npy` | Final binary mask used for skeletonisation (smoothed + filled). |
+| `{name}_skeleton.npy` | 1-voxel skeleton derived from the cleaned graph edges. |
+| `{name}_full_graph_skeleton.npy` | Skeleton from the *raw* (unpruned) graph — useful when comparing pruning effects. |
+| `{name}_graph_nodes.npz` | `pts` (N × 3) and `is_sprout` (N,) arrays for the cleaned graph. |
+| `{name}_clean_graph.pkl` | Pickled NetworkX graph (cleaned). |
+| `{name}_organoid_mask.npy` | XY exclusion mask used during analysis (only if organoid masking was on). |
+
+Failed images, if any, leave a `FAILED_diagnostics/{name}_debug.txt` under the output root explaining what went wrong (which threshold step failed, missing voxel metadata, etc.).
 
 ---
 
-## Output Metrics
+## 5. Output metrics
 
-The `_analysis_metrics.csv` file contains one row per image.
+`{name}_analysis_metrics.csv` is the **curated 18-metric panel** intended for cohort-level analysis (PCA, clustering, group comparisons). The schema is stable across images — missing values are filled with `NaN` so DataFrames concatenate cleanly.
 
-### Volume & Coverage
-| Metric | Description |
-|--------|-------------|
-| `chip_volume_um3` | Total analysed chip volume (µm³) |
-| `vessel_volume_um3` | Total vessel volume (µm³) |
-| `vessel_volume_fraction` | Vessel volume / chip volume |
+Voxel size is 2 µm isotropic, so all lengths/areas/volumes are in µm units. Densities are normalised by the **convex hull volume** of the cleaned vessel skeleton (not the raw chip volume), so they are robust to differences in how much of the chip happened to be in focus.
 
-### Network Topology
-| Metric | Description |
-|--------|-------------|
-| `total_vessel_length_um` | Cumulative centreline length (µm) |
-| `vessel_length_per_chip_volume_um_inverse2` | Vessel length density (µm⁻²) |
-| `sprouts_per_vessel_length_um_inverse` | Sprout density along the network (µm⁻¹) |
-| `junctions_per_vessel_length_um_inverse` | Branching frequency (µm⁻¹) |
-| `sprouts_per_chip_volume_um_inverse3` | Sprout count per chip volume (µm⁻³) |
-| `junctions_per_chip_volume_um_inverse3` | Junction count per chip volume (µm⁻³) |
+### Density (5)
+| Column | Meaning |
+|--------|---------|
+| `vessel_volume_fraction` | Vessel voxel volume / convex-hull volume of the analysed region. |
+| `branch_length_per_volume` | Total *branch* (sprout-free) skeleton length per hull volume — length density. |
+| `attached_sprouts_per_volume` | Count of sprouts attached to a junction, per hull volume. |
+| `junctions_per_volume` | Junction count per hull volume. |
+| `branches_per_volume` | Edge count per hull volume. |
 
-### Network Complexity
-| Metric | Description |
-|--------|-------------|
-| `skeleton_fractal_dimension` | Fractal dimension of the skeleton |
-| `skeleton_lacunarity` | Lacunarity (gap structure) of the skeleton |
+### Topology (2)
+| Column | Meaning |
+|--------|---------|
+| `skeleton_fractal_dimension` | Box-counting fractal dimension of the cleaned skeleton. |
+| `skeleton_lacunarity` | Mean lacunarity (gap-structure heterogeneity) across box scales. |
 
-### Vessel Morphology
-| Metric | Description |
-|--------|-------------|
-| `median_sprout_and_branch_tortuosity` | Median tortuosity (path length / straight-line distance) |
-| `p90_minus_p10_sprout_and_branch_tortuosity` | Spread of tortuosity (P90 − P10) |
-| `median_sprout_and_branch_median_cs_area_um2` | Median cross-sectional area (µm²) |
-| `p90_minus_p10_sprout_and_branch_median_cs_area_um2` | Spread of cross-sectional area (µm²) |
+### Branch geometry — branches only (4)
+| Column | Meaning |
+|--------|---------|
+| `median_branch_length` | Median per-branch centreline length (µm). |
+| `spread_branch_length` | P90 − P10 of per-branch length (µm). |
+| `median_branch_median_cs_area` | Median of per-branch median cross-sectional area (µm²). |
+| `spread_branch_median_cs_area` | P90 − P10 of the same (µm²). |
 
-### Junction & Sprout Distances
-| Metric | Description |
-|--------|-------------|
-| `median_junction_dist_nearest_junction_um` | Median nearest-junction spacing (µm) |
-| `p90_minus_p10_junction_dist_nearest_junction_um` | Spread of junction spacing (µm) |
-| `median_sprout_dist_nearest_endpoint_um` | Median nearest-sprout spacing (µm) |
-| `p90_minus_p10_sprout_dist_nearest_endpoint_um` | Spread of sprout spacing (µm) |
+### Tortuosity — branches only (2)
+| Column | Meaning |
+|--------|---------|
+| `median_branch_tortuosity` | Median path-length / chord-length ratio across branches. |
+| `spread_branch_tortuosity` | P90 − P10 of branch tortuosity. |
 
-### Internal Pores
-| Metric | Description |
-|--------|-------------|
-| `total_internal_pore_count` | Number of enclosed internal pores |
-| `internal_pore_area_fraction_in_filled_vascular_area` | Pore area / filled vessel area |
-| `median_internal_pore_area_um2` | Median pore area (µm²) |
-| `p90_minus_p10_internal_pore_area_um2` | Spread of pore area (µm²) |
-| `median_internal_pore_max_inscribed_radius_um` | Median max inscribed pore radius (µm) |
-| `p90_minus_p10_internal_pore_max_inscribed_radius_um` | Spread of pore radius (µm) |
-| `total_internal_pore_density_per_vessel_volume_um_inverse3` | Pore count per vessel volume (µm⁻³) |
+### Junction connectivity — branch-only graph (2)
+| Column | Meaning |
+|--------|---------|
+| `median_branch_only_junction_degree` | Median degree of junctions in the branch-only graph. |
+| `spread_branch_only_junction_degree` | P90 − P10 of the same. |
 
----
+### Orientation — sprouts + branches (2)
+| Column | Meaning |
+|--------|---------|
+| `median_sprout_and_branch_orientation` | Median angle of edges relative to the device axis. |
+| `spread_sprout_and_branch_orientation` | P90 − P10 of the same. |
 
-## Key Features
+### Vessel retraction / detachment proxy (1)
+| Column | Meaning |
+|--------|---------|
+| `floating_sprouts_per_volume` | Sprouts not attached to any junction (likely retracted/detached vessels) per hull volume. |
 
-- **Interactive napari GUI** for device segmentation, with a fully automatic batch fallback
-- **Organoid/central region masking** – optionally exclude a defined XY region from all analysis steps
-- **GPU-accelerated** image processing via CuPy (Gaussian smoothing, EDT, hole-filling, median filtering)
-- **3D Pix2Pix** brightfield-to-fluorescence translation with sliding-window inference
-- **2.5D segmentation** – U-Net inference on axial, coronal, and sagittal planes averaged for 3D consistency
-- **Graph-based analysis** using `sknw` and NetworkX with automatic edge pruning and topology extraction
-- **Comprehensive metrics** covering volume, length, tortuosity, cross-section, pores, and fractal properties
-- **Batch CLI** for unattended processing of entire directories
+`{name}_all_morphological_params.csv` additionally exposes raw counts, `chip_volume`, `convex_hull_volume`, `vessel_volume`, `total_vessel_length`, `average_vessel_volume`, the four nearest-neighbour distance summaries (`{median,spread}_{junction,sprout}_{skeleton,euclidean}_dist_nearest_{junction,endpoint}`), and the full per-junction / per-branch descriptive stats. See [Analysis_README.md](Analysis_README.md) for plain-language definitions of each parameter group.
 
 ---
 
-## Dependencies
 
-Core dependencies:
-
-- `torch`, `pytorch-lightning` – deep learning
-- `monai` – sliding-window inference
-- `segmentation-models-pytorch` – U-Net with MiT-B5 encoder
-- `napari`, `magicgui` – GUI framework
-- `cupy`, `cupyx` – GPU-accelerated array processing
-- `sknw`, `networkx` – skeleton graph extraction and analysis
-- `dask` – memory-efficient array operations
-- `liffile` – Leica `.lif` file reading
-- `tifffile`, `scikit-image`, `scipy`, `numpy`, `pandas`
+For the full technical reference (class signatures, helper-function semantics, GPU-memory notes), see [DOCUMENTATION.md](DOCUMENTATION.md). For the plain-language explanation of every analysis parameter, see [Analysis_README.md](Analysis_README.md).
