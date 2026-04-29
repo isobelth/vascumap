@@ -4,7 +4,8 @@
 **/*.tif
 !**/README_images/**
 !**/README_images/*
-
+*.cpython
+*.pyc
 data/
 outputs/
 results/
